@@ -21,8 +21,8 @@ def build_categories():
         lines.append(f"📦 {category}")
 
     lines.append("\nUse: help <category>")
-
-    lines.append("\n\nhttps://github.com/JamesM92/NodeBot")
+    lines.append("Type: about for project info")
+    lines.append("\ngithub.com/JamesM92/NodeBot")
     return "\n".join(lines)
 
 

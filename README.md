@@ -186,9 +186,6 @@ The `@register` decorator accepts:
 # Status
 systemctl status nodebot
 
-# Logs (live)
-journalctl -u nodebot -f
-
 # Restart
 sudo systemctl restart nodebot
 
@@ -200,8 +197,55 @@ If LXMF is installed, NomadNet runs as a separate service that NodeBot depends o
 
 ```bash
 systemctl status nomadnet nodebot
+```
+
+---
+
+## Monitoring
+
+### System logs
+
+Follow NodeBot's log output in real time:
+
+```bash
+journalctl -u nodebot -f
+```
+
+This shows all adapter activity — connections, disconnections, incoming messages, GPS pushes, relay events, and errors. Filter to a specific adapter with `grep`:
+
+```bash
+journalctl -u nodebot -f | grep meshtastic
+journalctl -u nodebot -f | grep meshcore
+journalctl -u nodebot -f | grep lxmf
+```
+
+If LXMF is installed, NomadNet has its own log stream:
+
+```bash
 journalctl -u nomadnet -f
 ```
+
+### MeshCore public channel traffic
+
+`chanlisten` lets you watch MeshCore public channel messages from the terminal without joining the mesh yourself. It connects to NodeBot's internal channel buffer over a Unix socket.
+
+```bash
+# Show the last 50 buffered messages then exit
+./chanlisten
+
+# Show last 50 messages and follow live (Ctrl-C to stop)
+./chanlisten -f
+
+# Show a specific number of buffered messages then follow
+./chanlisten -n 20 -f
+```
+
+Output format:
+```
+[2026-04-22 18:31:04] [meshcore/CH0] <NodeName> message text  (RSSI:-85 SNR:4.5)
+```
+
+`chanlisten` requires NodeBot to be running with a MeshCore adapter connected — it reads from the live buffer that NodeBot maintains. If NodeBot isn't running it will wait up to 10 seconds then exit with an error.
 
 ---
 
@@ -221,6 +265,9 @@ NodeBot writes LoRa config on connect and saves the applied values to `~/.nodebo
 
 **MeshCore or Meshtastic not responding to commands**
 Check that the correct port is set in `config.ini` and that NodeBot has permission to access it (`ls -la /dev/meshcore0 /dev/meshtastic0` — should be owned by `dialout` group; add your user with `sudo usermod -aG dialout $USER`).
+
+**`Input/output error` on serial ports / `cp210x_open - Unable to enable UART` in dmesg**
+The Pi is undervoltaged. When multiple USB-serial radios draw current simultaneously, a weak or long power cable drops the supply voltage below what the CP210x chips need to initialise. Check `dmesg | tail -30` for `Undervoltage detected!` lines. Fix: use a good-quality short USB-C cable and a PSU rated for at least 5V/3A (Pi 4) or 5V/5A (Pi 5). A powered USB hub removes the load from the Pi's regulator entirely and is the most reliable solution when running three radios.
 
 ---
 
