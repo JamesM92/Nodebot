@@ -1,0 +1,6 @@
+appdirs>=1.4.4
+lxmf>=0.9.4
+rns>=1.1.4
+# NomadNet provides the RNS shared instance NodeBot connects to.
+# Install separately: pip install nomadnet
+nomadnet>=0.9.9

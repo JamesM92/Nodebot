@@ -1,0 +1,28 @@
+# NodeBot default service template.
+# Installed by installer/install_nodebot.sh with correct absolute paths.
+# No protocol-specific dependencies — runs NodeBot standalone.
+#
+# Run installer/install_lxmf.sh afterwards to upgrade this service
+# to depend on NomadNet and wait for the RNS shared instance.
+
+[Unit]
+Description=NodeBot Multi-Protocol Mesh Relay System
+Documentation=https://github.com/JamesM92/NodeBot
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=penguin
+WorkingDirectory=/home/penguin/github.com/JamesM92/NodeBot/src
+ExecStart=/home/penguin/github.com/JamesM92/NodeBot/.venv/bin/python3 /home/penguin/github.com/JamesM92/NodeBot/src/runbot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

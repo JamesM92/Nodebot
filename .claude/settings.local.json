@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(python3 -c \"import RNS; print\\('RNS version:', RNS.__version__\\)\")",
+      "Bash(python3 -m pip show nomadnet)",
+      "Bash(pip3 install *)",
+      "Bash(uv --version)",
+      "Bash(/home/penguin/github.com/JamesM92/NodeBot/.venv/bin/python -c \"import RNS; print\\('RNS:', RNS.__version__\\)\")",
+      "Bash(/home/penguin/github.com/JamesM92/NodeBot/.venv/bin/pip show *)",
+      "Bash(/home/penguin/github.com/JamesM92/NodeBot/.venv/bin/python3 -c \"import RNS; print\\('RNS:', RNS.__version__\\)\")",
+      "Bash(chmod +x /home/penguin/github.com/JamesM92/NodeBot/.venv/bin/python3 /home/penguin/github.com/JamesM92/NodeBot/.venv/bin/python /home/penguin/github.com/JamesM92/NodeBot/.venv/bin/pip /home/penguin/github.com/JamesM92/NodeBot/.venv/bin/pip3)",
+      "Bash(/home/penguin/github.com/JamesM92/NodeBot/.venv/bin/python3 -c \"import RNS; print\\('RNS:', RNS.__version__\\); import LXMF; print\\('LXMF:', LXMF.__version__\\)\")",
+      "Bash(/home/penguin/github.com/JamesM92/NodeBot/.venv/bin/pip3 install *)",
+      "Read(//dev/**)",
+      "Read(//dev/serial/by-id/**)",
+      "Bash(pip3 show *)",
+      "Bash(pip3 search *)",
+      "Bash(pip index *)",
+      "Bash(pip3 index *)",
+      "Bash(python3 -c ' *)",
+      "Bash(chmod +x /home/penguin/github.com/JamesM92/NodeBot/installer/install_meshcore.sh)",
+      "Bash(bash -n /home/penguin/github.com/JamesM92/NodeBot/installer/install_meshcore.sh)",
+      "Bash(journalctl -u nodebot --no-pager -n 40)"
+    ]
+  }
+}

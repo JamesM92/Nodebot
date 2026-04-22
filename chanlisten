@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""
+chanlisten — view MeshCore public channel messages
+
+Usage:
+  ./chanlisten              show last 50 buffered messages then exit
+  ./chanlisten -f           show buffered messages then follow live
+  ./chanlisten -n 20        show last 20 buffered messages then exit
+  ./chanlisten -n 20 -f     show last 20 buffered messages then follow live
+"""
+
+import json
+import os
+import socket
+import sys
+import time
+
+SOCK_PATH = "/tmp/nodebot_chan.sock"
+
+
+def fmt(entry):
+    chan   = entry.get("chan", "?")
+    when   = entry.get("when", "?")
+    proto  = entry.get("proto", "?")
+    sender = entry.get("sender", "?")
+    text   = entry.get("text", "")
+    rssi   = entry.get("rssi")
+    snr    = entry.get("snr")
+
+    line = f"[{when}] [{proto}/CH{chan}] <{sender}> {text}"
+
+    if rssi is not None or snr is not None:
+        parts = []
+        if rssi is not None:
+            parts.append(f"RSSI:{rssi:.0f}")
+        if snr is not None:
+            parts.append(f"SNR:{snr:.1f}")
+        line += f"  ({' '.join(parts)})"
+
+    return line
+
+
+def main():
+    args = sys.argv[1:]
+    follow_mode = "-f" in args
+
+    n = 50
+    if "-n" in args:
+        idx = args.index("-n")
+        if idx + 1 < len(args):
+            try:
+                n = int(args[idx + 1])
+            except ValueError:
+                pass
+
+    sock = None
+    for attempt in range(20):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(SOCK_PATH)
+            sock = s
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            s.close()
+            if attempt == 0:
+                print("Waiting for channel server...", flush=True)
+            time.sleep(0.5)
+
+    if sock is None:
+        print("Cannot connect to channel server (is NodeBot running?)")
+        sys.exit(1)
+
+    f = sock.makefile("r")
+    history = []
+    in_history = True
+
+    try:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if entry.get("type") == "history_end":
+                for e in history[-n:]:
+                    print(fmt(e), flush=True)
+                in_history = False
+                if not follow_mode:
+                    break
+                continue
+
+            if in_history:
+                history.append(entry)
+            else:
+                print(fmt(entry), flush=True)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sock.close()
+
+
+if __name__ == "__main__":
+    main()

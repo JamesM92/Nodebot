@@ -1,0 +1,41 @@
+# NodeBot Configuration
+# Copy this file to config.ini and edit before starting NodeBot.
+#
+#   cp config.example config.ini
+
+[rns]
+# Reticulum config directory. Leave blank to use the default (~/.reticulum).
+# Only set this if you run Reticulum from a non-standard location.
+# config_dir =
+
+[bot]
+# Display name announced on the mesh network.
+name = NodeBot
+
+# Storage path for the LXMF identity file and message queue.
+# ~ expands to the home directory of the user running NodeBot.
+storage_path = ~/.nodebot/lxmf_storage
+
+[admin]
+# One or more LXMF addresses (comma or space separated) that are permanently
+# trusted as administrators without needing a password.
+# Leave blank to use password-only admin login.
+addresses =
+
+# Admin password in plain text — hashed on first load.
+# CHANGE THIS before deploying.
+password = changeme
+
+[meshcore]
+# Serial port for the MeshCore radio. The installer creates a stable udev
+# symlink at /dev/meshcore0 so this path survives USB reconnects.
+# port = /dev/meshcore0
+# baudrate = 115200
+
+[plugins]
+# Maximum seconds a plugin function may run before it is killed.
+# Increase for plugins that do file or network I/O (e.g. weewx weather).
+timeout_sec = 5
+
+# Minimum seconds between scans of the plugins/ directory for hot-reload.
+scan_interval = 5
