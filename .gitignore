@@ -1,4 +1,4 @@
 # set to ignore from git commits the following content.
-.claude/ 	#i am using claude for developement, but doesnt contain anything needed for use.
-.venv/ 		# a local venv should be used, 
+.claude\ 	#i am using claude for developement, but doesnt contain anything needed for use.
+.venv\ 		# a local venv should be used, 
 config.ini 	#admin password is stored inside

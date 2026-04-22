@@ -68,8 +68,12 @@ class NodeBot:
         if not session_key:
             return
 
-        # Sender is in a relay session but didn't use Respond: — notify, don't forward
-        send_callback(sender, "Relay active. Use: Respond: <message>")
+        # Auto-forward to the session peer. This is how replies chain back
+        # through multiple NodeBot hops without any manual Respond: steps.
+        forwarded = relay_mod.auto_forward(sender, message)
+        if not forwarded:
+            # Session found but no peer — sender is a human, remind them.
+            send_callback(sender, "Relay active. Use: Respond: <message>")
 
     # =====================================================
     # LOCKDOWN
@@ -109,18 +113,26 @@ class NodeBot:
     # =====================================================
 
     _PROTO_MAP = {
-        "mc":       "meshcore_adapter",
-        "meshcore": "meshcore_adapter",
-        "lxmf":     "lxmf_adapter",
+        "mc":         "meshcore_adapter",
+        "meshcore":   "meshcore_adapter",
+        "lxmf":       "lxmf_adapter",
+        "mesh":       "meshtastic_adapter",
+        "meshtastic": "meshtastic_adapter",
     }
 
-    # MeshCore practical message size limit
-    _MC_MSG_LIMIT = 190
+    # Per-transport practical message size limits
+    _MC_MSG_LIMIT   = 190   # MeshCore
+    _MESH_MSG_LIMIT = 220   # Meshtastic (237 byte packet minus overhead)
 
     @staticmethod
     def _split_text(proto, text):
         """Split text into chunks that fit the transport's message limit."""
-        limit = NodeBot._MC_MSG_LIMIT if proto in ("mc", "meshcore") else None
+        if proto in ("mc", "meshcore"):
+            limit = NodeBot._MC_MSG_LIMIT
+        elif proto in ("mesh", "meshtastic"):
+            limit = NodeBot._MESH_MSG_LIMIT
+        else:
+            limit = None
         if limit is None or len(text) <= limit:
             return [text]
 
@@ -158,22 +170,28 @@ class NodeBot:
 
         return chunks or [text]
 
-    def send(self, destination, text):
+    def send(self, destination, text, notify_cb=None):
         """Route an outbound message to a transport by 'proto:addr' destination."""
         # Raw bytes destination — treat as LXMF hash directly
         if isinstance(destination, (bytes, bytearray)):
             adapter = self.transports.get("lxmf_adapter")
             if not adapter:
                 print("[engine] send: lxmf_adapter not loaded")
+                if notify_cb:
+                    notify_cb(False)
                 return
             try:
-                adapter.send_message(destination, text)
+                adapter.send_message(destination, text, notify_cb=notify_cb)
             except Exception as e:
                 print(f"[engine] send error (lxmf bytes): {e}")
+                if notify_cb:
+                    notify_cb(False)
             return
 
         if ":" not in destination:
             print(f"[engine] send: invalid destination '{destination}'")
+            if notify_cb:
+                notify_cb(False)
             return
 
         proto, addr = destination.split(":", 1)
@@ -181,22 +199,30 @@ class NodeBot:
 
         if not adapter_name:
             print(f"[engine] send: unknown protocol '{proto}'")
+            if notify_cb:
+                notify_cb(False)
             return
 
         adapter = self.transports.get(adapter_name)
         if not adapter:
             print(f"[engine] send: adapter '{adapter_name}' not loaded")
+            if notify_cb:
+                notify_cb(False)
             return
 
         chunks = self._split_text(proto.lower(), text)
         try:
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                # Only attach the callback to the last chunk
+                cb = notify_cb if i == len(chunks) - 1 else None
                 if adapter_name == "lxmf_adapter":
-                    adapter.send_message(bytes.fromhex(addr), chunk)
-                elif adapter_name == "meshcore_adapter":
-                    adapter._send_reply(addr, chunk)
+                    adapter.send_message(bytes.fromhex(addr), chunk, notify_cb=cb)
+                elif adapter_name in ("meshcore_adapter", "meshtastic_adapter"):
+                    adapter._send_reply(addr, chunk, notify_cb=cb)
         except Exception as e:
             print(f"[engine] send error to {destination}: {e}")
+            if notify_cb:
+                notify_cb(False)
 
     # =====================================================
     # ANNOUNCE

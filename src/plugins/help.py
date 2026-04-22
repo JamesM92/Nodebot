@@ -22,7 +22,7 @@ def build_categories():
 
     lines.append("\nUse: help <category>")
 
-    lines.append("\n\nhttps://github.com/JamesM92/LXMF_Bot")
+    lines.append("\n\nhttps://github.com/JamesM92/NodeBot")
     return "\n".join(lines)
 
 

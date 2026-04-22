@@ -247,7 +247,12 @@ def handle_command(message, sender):
     args = parts[1:]
 
     if cmd not in COMMANDS:
-        return None, False
+        # Allow trailing colon variants (e.g. "Relay:" → "relay")
+        stripped = cmd.rstrip(":")
+        if stripped != cmd and stripped in COMMANDS:
+            cmd = stripped
+        else:
+            return None, False
 
     entry = COMMANDS[cmd]
 

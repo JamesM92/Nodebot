@@ -17,14 +17,14 @@ def echo(args, sender):
 
 @register(
     "info",
-    "Show community node info",
+    "Show bot info",
     category="community",
     cooldown=60
 )
 def info(args):
 
     return (
-        "Community Mesh Node\n"
-        "Provides network diagnostics and utility services.\n"
+        "NodeBot\n"
+        "Multi-protocol mesh network chatbot.\n"
         "Type 'help' for available commands."
     )

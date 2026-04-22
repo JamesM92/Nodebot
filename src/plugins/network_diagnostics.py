@@ -1,13 +1,6 @@
-##########################
-
 import time
-import RNS
-from commands import register
+from commands import register, BOT_INSTANCE
 
-
-# -------------------------
-# Interfaces
-# -------------------------
 
 @register(
     "interfaces",
@@ -18,22 +11,19 @@ from commands import register
 def interfaces(args):
 
     try:
-        interfaces = getattr(RNS.Transport, "interfaces", [])
+        import RNS
+        ifaces = getattr(RNS.Transport, "interfaces", [])
 
-        if not interfaces:
+        if not ifaces:
             return "No active interfaces found."
 
-        return "Active Interfaces:\n" + "\n".join(
-            f"- {i}" for i in interfaces
-        )
+        return "Active Interfaces:\n" + "\n".join(f"- {i}" for i in ifaces)
 
+    except ImportError:
+        return "Reticulum not available."
     except Exception as e:
         return f"Error: {repr(e)}"
 
-
-# -------------------------
-# Neighbors
-# -------------------------
 
 @register(
     "neighbors",
@@ -44,26 +34,23 @@ def interfaces(args):
 def neighbors(args):
 
     try:
-        neighbors = getattr(
+        import RNS
+        nbrs = getattr(
             RNS.Transport,
             "neighbours",
             getattr(RNS.Transport, "neighbors", [])
         )
 
-        if not neighbors:
+        if not nbrs:
             return "No neighbors currently known."
 
-        return "Known Neighbors:\n" + "\n".join(
-            f"- {n}" for n in neighbors
-        )
+        return "Known Neighbors:\n" + "\n".join(f"- {n}" for n in nbrs)
 
+    except ImportError:
+        return "Reticulum not available."
     except Exception as e:
         return f"Error: {repr(e)}"
 
-
-# -------------------------
-# Paths
-# -------------------------
 
 @register(
     "paths",
@@ -74,22 +61,19 @@ def neighbors(args):
 def paths(args):
 
     try:
-        paths = getattr(RNS.Transport, "paths", [])
+        import RNS
+        known = getattr(RNS.Transport, "paths", [])
 
-        if not paths:
+        if not known:
             return "No known paths."
 
-        return "Known Paths:\n" + "\n".join(
-            f"- {p}" for p in paths
-        )
+        return "Known Paths:\n" + "\n".join(f"- {p}" for p in known)
 
+    except ImportError:
+        return "Reticulum not available."
     except Exception as e:
         return f"Error: {repr(e)}"
 
-
-# -------------------------
-# Node Info
-# -------------------------
 
 @register(
     "nodeinfo",
@@ -100,47 +84,46 @@ def paths(args):
 def nodeinfo(args):
 
     try:
-        interfaces = getattr(RNS.Transport, "interfaces", [])
-
-        neighbors = getattr(
+        import RNS
+        ifaces = getattr(RNS.Transport, "interfaces", [])
+        nbrs = getattr(
             RNS.Transport,
             "neighbours",
             getattr(RNS.Transport, "neighbors", [])
         )
+        known = getattr(RNS.Transport, "paths", [])
 
-        paths = getattr(RNS.Transport, "paths", [])
-
-        info = [
+        return "\n".join([
             "Reticulum Node Information",
             "---------------------------",
             f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Interfaces: {len(interfaces)}",
-            f"Neighbors: {len(neighbors)}",
-            f"Known Paths: {len(paths)}"
-        ]
+            f"Interfaces: {len(ifaces)}",
+            f"Neighbors: {len(nbrs)}",
+            f"Known Paths: {len(known)}",
+        ])
 
-        return "\n".join(info)
-
+    except ImportError:
+        return "Reticulum not available."
     except Exception as e:
         return f"Error: {repr(e)}"
 
 
-# -------------------------
-# Announce (Admin Only)
-# -------------------------
-
 @register(
     "announce",
-    "Manually trigger LXMF announce",
+    "Re-announce on all transports",
     category="network",
     admin=True,
-    cooldown=0
+    cooldown=30
 )
-def announce(args):
+def announce(args, sender):
 
-    try:
-        RNS.Transport.announce()
-        return "Announcement sent."
+    bot = BOT_INSTANCE
+    if bot is None:
+        return "Bot not initialized."
 
-    except Exception as e:
-        return f"Failed to send announce: {repr(e)}"
+    announced = bot.announce_all()
+    if not announced:
+        return "No transports with announce support are loaded."
+
+    names = ", ".join(t.replace("_adapter", "") for t in announced)
+    return f"Announced on: {names}"

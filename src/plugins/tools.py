@@ -1,5 +1,3 @@
-##############################
-
 import time
 from commands import register
 

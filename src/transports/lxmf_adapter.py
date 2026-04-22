@@ -268,7 +268,7 @@ class LXMFAdapter:
     # OUTBOUND MESSAGE
     # =====================================================
 
-    def send_message(self, destination_hash, content):
+    def send_message(self, destination_hash, content, notify_cb=None):
 
         try:
             if not self.router:
@@ -285,6 +285,8 @@ class LXMFAdapter:
                         f"[lxmf_adapter] no route to {RNS.prettyhexrep(destination_hash)}, dropping",
                         RNS.LOG_WARNING
                     )
+                    if notify_cb:
+                        notify_cb(False)
                     return
                 dest = RNS.Destination(
                     dest_identity,
@@ -304,6 +306,11 @@ class LXMFAdapter:
                 desired_method=LXMF.LXMessage.DIRECT
             )
 
+            if notify_cb:
+                def _on_delivery(message):
+                    notify_cb(message.state == LXMF.LXMessage.STATE_DELIVERED)
+                msg.delivery_callback = _on_delivery
+
             self.router.handle_outbound(msg)
 
             RNS.log(
@@ -313,10 +320,8 @@ class LXMFAdapter:
 
         except Exception as e:
             RNS.log(f"[lxmf_adapter] send failed: {e}", RNS.LOG_ERROR)
-
-    # =====================================================
-    # STOP
-    # =====================================================
+            if notify_cb:
+                notify_cb(False)
 
     # =====================================================
     # ANNOUNCE

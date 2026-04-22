@@ -26,11 +26,69 @@ addresses =
 # CHANGE THIS before deploying.
 password = changeme
 
+[gps]
+# Location sharing — set by the NodeBot installer.
+# gps_mode: disabled | manual | gpsd | serial | future
+# gps_mode = disabled
+# gps_lat =
+# gps_lon =
+# gps_alt = 0
+# gps_device =
+# gps_precision = 4
+
 [meshcore]
 # Serial port for the MeshCore radio. The installer creates a stable udev
 # symlink at /dev/meshcore0 so this path survives USB reconnects.
+# IMPORTANT: this must point to a different device than [meshtastic] port.
 # port = /dev/meshcore0
 # baudrate = 115200
+
+[meshtastic]
+# Serial port for the Meshtastic radio. The installer creates a stable udev
+# symlink at /dev/meshtastic0 so this path survives USB reconnects.
+# IMPORTANT: this must point to a different device than [meshcore] port.
+# port = /dev/meshtastic0
+# baudrate = 115200
+
+# LoRa radio settings — written by the Meshtastic installer.
+# region must match your country (e.g. US, EU_868, AU_915). Leave blank to
+# skip programming (use whatever is already on the device).
+# region =
+#
+# modem_preset controls the speed/range tradeoff. Valid values:
+#   SHORT_TURBO    — fastest, not legal everywhere (500 kHz BW)
+#   SHORT_FAST
+#   SHORT_SLOW
+#   MEDIUM_FAST
+#   MEDIUM_SLOW
+#   LONG_FAST      — default, good balance of speed and range
+#   LONG_MODERATE
+#   LONG_SLOW
+#   VERY_LONG_SLOW — slowest / maximum range
+# modem_preset = LONG_FAST
+#
+# hop_limit = 7
+# tx_power = 0
+
+[telemetry]
+# Environmental data broadcast via protocols that support it (e.g. Meshtastic).
+# mode: disabled | static | script | weewx
+# mode = disabled
+
+# How often to broadcast telemetry (minutes).
+# interval_minutes = 10
+
+# static: fixed values sent every interval.
+# static_temp =        # °C
+# static_humidity =    # %
+# static_pressure =    # hPa
+
+# script: path to a script that prints JSON to stdout.
+# Output: {"temperature": 22.5, "humidity": 65.0, "pressure": 1013.25}
+# script =
+
+# weewx: path to weewx SQLite database (auto-converts Imperial→SI).
+# weewx_db = /var/lib/weewx/weewx.sdb
 
 [plugins]
 # Maximum seconds a plugin function may run before it is killed.

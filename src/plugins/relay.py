@@ -2,7 +2,7 @@
 # plugins/relay.py
 
 import time
-from commands import register, BOT_INSTANCE
+from commands import register, BOT_INSTANCE, is_admin
 
 # =====================================================
 # STATE
@@ -14,8 +14,10 @@ ACTIVE_REPLY_SESSION = set()
 BLOCKED_USERS = set()
 RECENT_RELAYS = {}
 MESSAGE_HISTORY = {}
+SESSION_TIMESTAMPS = {}  # key -> last activity timestamp
 
 LOOP_TIMEOUT = 30
+SESSION_TTL  = 3600  # seconds of inactivity before a session expires
 
 
 # =====================================================
@@ -55,11 +57,24 @@ def is_loop(sender, target):
 
 def activate_session(user):
     ACTIVE_REPLY_SESSION.add(user)
+    SESSION_TIMESTAMPS[user] = time.time()
 
 
 def clear_session(user):
     ACTIVE_REPLY_SESSION.discard(user)
     LAST_CONTACT.pop(user, None)
+    SESSION_TIMESTAMPS.pop(user, None)
+
+
+def _expire_sessions():
+    """Remove sessions that have been idle longer than SESSION_TTL."""
+    now = time.time()
+    expired = [k for k, ts in SESSION_TIMESTAMPS.items() if now - ts > SESSION_TTL]
+    for key in expired:
+        peer = LAST_CONTACT.get(key)
+        clear_session(key)
+        if peer:
+            clear_session(peer)
 
 
 def store_history(user, msg):
@@ -68,13 +83,51 @@ def store_history(user, msg):
     MESSAGE_HISTORY[user] = MESSAGE_HISTORY[user][-10:]
 
 
-def send_message(destination, text):
+def send_message(destination, text, notify_cb=None):
     if hasattr(BOT_INSTANCE, "send"):
-        BOT_INSTANCE.send(destination, text)
+        BOT_INSTANCE.send(destination, text, notify_cb=notify_cb)
+
+
+def auto_forward(sender, message):
+    """Forward a message from a relay session participant to their peer.
+
+    Called by engine._handle_plugins when a non-command arrives from someone
+    in an active relay session. Returns True if forwarded, False if no session.
+    This is how reply chains work across multiple NodeBot hops.
+    """
+    if isinstance(sender, (bytes, bytearray)):
+        sender = "lxmf:" + sender.hex()
+    sender_str = str(sender).lower()
+
+    session_key, normalized = _resolve_session(sender_str)
+    if not session_key:
+        return False
+
+    _upgrade_session(session_key, normalized)
+    effective_sender = normalized if normalized else session_key
+
+    destination = LAST_CONTACT.get(effective_sender)
+    if not destination:
+        return False
+
+    if is_loop(effective_sender, destination):
+        return False
+
+    store_history(effective_sender, message)
+    store_history(destination, message)
+
+    LAST_CONTACT[destination] = effective_sender
+    activate_session(destination)
+    SESSION_TIMESTAMPS[effective_sender] = time.time()
+
+    send_message(destination, message)
+    return True
 
 
 def _resolve_session(sender):
     """Find an existing session that matches sender.
+
+    Expired sessions (idle > SESSION_TTL) are removed before lookup.
 
     Handles the case where the session was stored with a short proto-prefixed
     key (e.g. 'mc:091733a4') but the incoming sender is the full raw prefix
@@ -84,6 +137,8 @@ def _resolve_session(sender):
     - session_key:    the key currently in ACTIVE_REPLY_SESSION
     - normalized_key: the full 'proto:addr' form to upgrade to
     """
+    _expire_sessions()
+
     if isinstance(sender, (bytes, bytearray)):
         sender = "lxmf:" + sender.hex()
 
@@ -132,9 +187,12 @@ def _upgrade_session(old_key, new_key):
         "Send cross-network message\n\n"
         "Usage:\n"
         "  relay <protocol:address> <message>\n\n"
+        "Chain through another NodeBot:\n"
+        "  relay <nodebot> relay <target> <message>\n\n"
         "Examples:\n"
         "  relay lxmf:abc123 Hello\n"
         "  relay mc:091733a4 Hi there\n"
+        "  relay mc:28276 relay mc:8276tr Hello\n"
     ),
     category="relay",
     cooldown=5
@@ -173,14 +231,26 @@ def relay_cmd(args, sender):
     activate_session(destination)
     SEEN_USERS.add(destination)
 
-    payload = format_message(norm_sender, message)
+    # Chained relay: payload is itself a relay command. Send it raw so the
+    # next NodeBot processes it as a command rather than a human message.
+    if message.lower().startswith("relay "):
+        payload = message
+    else:
+        payload = format_message(norm_sender, message)
 
     store_history(norm_sender, payload)
     store_history(destination, payload)
 
-    send_message(destination, payload)
+    _notify_sender = norm_sender
 
-    return f"Relayed to {destination}"
+    def _on_delivery(success):
+        import threading
+        msg = "Relay: delivered" if success else "Relay: delivery failed"
+        threading.Thread(target=send_message, args=(_notify_sender, msg), daemon=True).start()
+
+    send_message(destination, payload, notify_cb=_on_delivery)
+
+    return None
 
 
 # =====================================================
@@ -222,9 +292,16 @@ def respond_cmd(args, sender):
     store_history(effective_sender, payload)
     store_history(destination, payload)
 
-    send_message(destination, payload)
+    _notify_sender = effective_sender
 
-    return "Response sent"
+    def _on_delivery(success):
+        import threading
+        msg = "Relay: delivered" if success else "Relay: delivery failed"
+        threading.Thread(target=send_message, args=(_notify_sender, msg), daemon=True).start()
+
+    send_message(destination, payload, notify_cb=_on_delivery)
+
+    return None
 
 
 # =====================================================
@@ -267,9 +344,16 @@ def respond_colon(args, sender):
     store_history(effective_sender, payload)
     store_history(destination, payload)
 
-    send_message(destination, payload)
+    _notify_sender = effective_sender
 
-    return "Sent."
+    def _on_delivery(success):
+        import threading
+        msg = "Relay: delivered" if success else "Relay: delivery failed"
+        threading.Thread(target=send_message, args=(_notify_sender, msg), daemon=True).start()
+
+    send_message(destination, payload, notify_cb=_on_delivery)
+
+    return None
 
 
 # =====================================================
@@ -355,3 +439,43 @@ def relay_history(args, sender):
         return "No history available."
 
     return "\n\n---\n\n".join(history[-5:])
+
+
+# =====================================================
+# SESSION LIST (admin)
+# =====================================================
+
+@register(
+    "relaysessions",
+    "List active relay sessions",
+    category="relay",
+    admin=True,
+    cooldown=2
+)
+def relay_sessions_cmd(args, sender):
+
+    _expire_sessions()
+
+    if not ACTIVE_REPLY_SESSION:
+        return "No active relay sessions."
+
+    now = time.time()
+    lines = [f"Active sessions: {len(ACTIVE_REPLY_SESSION)}"]
+    seen = set()
+
+    for key in sorted(ACTIVE_REPLY_SESSION):
+        peer = LAST_CONTACT.get(key)
+        pair = tuple(sorted([key, peer or "?"]))
+        if pair in seen:
+            continue
+        seen.add(pair)
+
+        idle = int(now - SESSION_TIMESTAMPS.get(key, now))
+        if idle < 60:
+            age = f"{idle}s"
+        else:
+            age = f"{idle // 60}m"
+
+        lines.append(f"{key} <-> {peer or '?'} (idle {age})")
+
+    return "\n".join(lines)

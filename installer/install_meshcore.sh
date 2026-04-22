@@ -359,7 +359,7 @@ echo ""
 echo "[5/5] Updating config.ini..."
 
 if [ ! -f "$CONFIG_INI" ]; then
-    echo "  config.ini not found. Copy config.example to config.ini first."
+    echo "  config.ini not found. Run install_nodebot.sh first."
     exit 1
 fi
 
@@ -372,8 +372,8 @@ path, baud = sys.argv[1], sys.argv[2]
 with open(path) as f:
     content = f.read()
 
-content = re.sub(r'(?m)^#?\s*port\s*=.*$', f'port = /dev/meshcore0', content)
-content = re.sub(r'(?m)^#?\s*baudrate\s*=.*$', f'baudrate = {baud}', content)
+content = re.sub(r'(?m)^#?\s*port\s*=.*$',     'port = /dev/meshcore0', content)
+content = re.sub(r'(?m)^#?\s*baudrate\s*=.*$', f'baudrate = {baud}',    content)
 
 with open(path, 'w') as f:
     f.write(content)
@@ -396,7 +396,7 @@ echo "================================================"
 echo ""
 printf "  Region    : %s\n"     "$REGION_LABEL"
 printf "  Frequency : %s MHz\n" "$MC_FREQ"
-printf "  Forwarding: %s\n"          "$FORWARD_LABEL"
+printf "  Forwarding: %s\n"     "$FORWARD_LABEL"
 printf "  Symlink   : /dev/meshcore0\n"
 printf "  Config    : %s\n"     "$CONFIG_INI"
 echo ""
