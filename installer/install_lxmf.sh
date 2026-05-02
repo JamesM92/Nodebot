@@ -349,21 +349,36 @@ if $USE_RNODE; then
     echo ""
 fi
 
+DEFAULT_TCP_NAME="Michmesh Testnet"
+DEFAULT_TCP_HOST="RNS.MichMesh.net"
+DEFAULT_TCP_PORT="7822"
+
+TCP_NAME=""
 TCP_HOST=""
 TCP_PORT=""
 if $USE_TCP; then
     echo "  ── TCP server ───────────────────────────────────────"
     echo ""
-    printf "  Server hostname or IP: "
-    read -r TCP_HOST || true
-    printf "  Port (default 4242): "
-    read -r TCP_PORT || true
-    TCP_PORT="${TCP_PORT:-4242}"
-    [[ "$TCP_PORT" =~ ^[0-9]+$ ]] || { echo "  Invalid port, using 4242."; TCP_PORT=4242; }
+    echo "  Default server: $DEFAULT_TCP_NAME"
+    echo "    Host : $DEFAULT_TCP_HOST"
+    echo "    Port : $DEFAULT_TCP_PORT"
     echo ""
-    echo "  Note: announces received via TCP will not be written to the"
-    echo "  announce log (announce_log_local_only = true in config.ini)."
-    echo "  Direct messages received over TCP are always logged."
+    printf "  Press Enter to use the default, or type a different host: "
+    read -r TCP_HOST || true
+    if [[ -z "$TCP_HOST" ]]; then
+        TCP_HOST="$DEFAULT_TCP_HOST"
+        TCP_PORT="$DEFAULT_TCP_PORT"
+        TCP_NAME="$DEFAULT_TCP_NAME"
+    else
+        TCP_NAME="$TCP_HOST"
+        printf "  Port (default 7822): "
+        read -r TCP_PORT || true
+        TCP_PORT="${TCP_PORT:-7822}"
+        [[ "$TCP_PORT" =~ ^[0-9]+$ ]] || { echo "  Invalid port, using 7822."; TCP_PORT=7822; }
+    fi
+    echo ""
+    echo "  Note: additional TCP servers can be added later by editing"
+    echo "  ~/.reticulum/config and adding more [[TCPClientInterface]] blocks."
     echo ""
 fi
 
@@ -376,7 +391,7 @@ if $USE_RNODE; then
     printf "  TX Power    : %s dBm\n" "$TXPOWER"
     printf "  Location ref: %s\n" "$LOCATION"
 fi
-[[ -n "$TCP_HOST" ]] && printf "  TCP server  : %s:%s\n" "$TCP_HOST" "$TCP_PORT"
+[[ -n "$TCP_HOST" ]] && printf "  TCP server  : %s  (%s:%s)\n" "$TCP_NAME" "$TCP_HOST" "$TCP_PORT"
 echo "  ────────────────────────────────────────────────────"
 echo ""
 printf "  Write this to ~/.reticulum/config? (yes/no): "
@@ -433,12 +448,14 @@ RNODEEOF
     if [[ -n "$TCP_HOST" ]]; then
         cat >> "$RNS_CONFIG" <<TCPEOF
 
-  [[TCPClientInterface]]
+  [[$TCP_NAME]]
     type = TCPClientInterface
     interface_enabled = True
     outgoing = True
     target_host = $TCP_HOST
     target_port = $TCP_PORT
+    # To add more TCP servers, copy this block and change the name, host, and port.
+    # See: https://reticulum.network/manual/interfaces.html#tcp-client-interface
 TCPEOF
     fi
 
