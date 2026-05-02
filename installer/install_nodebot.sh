@@ -411,18 +411,34 @@ if [[ "$GPS_MODE" != "disabled" ]]; then
     echo ""
     echo "  ── Coordinate precision / privacy ──────────────────"
     echo "  Fewer decimal places = larger shown area, more private."
+    echo "  Enter the number of decimal places you want (0–6):"
     echo ""
-    echo "    1) 2 decimal places  — ~1.1 km  (neighbourhood)"
-    echo "    2) 3 decimal places  — ~111 m   (street level)"
-    echo "    3) 4 decimal places  — ~11 m    (building)     ← recommended"
-    echo "    4) 5 decimal places  — ~1.1 m   (precise position)"
+    echo "    0 — ~111 km   (country / state)"
+    echo "    1 — ~11 km    (city)"
+    echo "    2 — ~1.1 km   (neighbourhood)"
+    echo "    3 — ~111 m    (street level)"
+    echo "    4 — ~11 m     (building)     ← recommended"
+    echo "    5 — ~1.1 m    (precise position)"
+    echo "    6 — ~0.11 m   (sub-metre)"
     echo ""
-    GPS_PREC_SEL=$(pick "Precision" 4)
-    case "$GPS_PREC_SEL" in
-        1) GPS_PRECISION=2; GPS_PREC_LABEL="2 d.p. (~1.1 km)" ;;
-        2) GPS_PRECISION=3; GPS_PREC_LABEL="3 d.p. (~111 m)"  ;;
-        3) GPS_PRECISION=4; GPS_PREC_LABEL="4 d.p. (~11 m)"   ;;
-        4) GPS_PRECISION=5; GPS_PREC_LABEL="5 d.p. (~1.1 m)"  ;;
+    while true; do
+        printf "  Decimal places [0-6, default 4]: "
+        read -r GPS_PREC_IN || true
+        GPS_PREC_IN="${GPS_PREC_IN:-4}"
+        if [[ "$GPS_PREC_IN" =~ ^[0-6]$ ]]; then
+            GPS_PRECISION="$GPS_PREC_IN"
+            break
+        fi
+        echo "  Please enter a number between 0 and 6."
+    done
+    case "$GPS_PRECISION" in
+        0) GPS_PREC_LABEL="0 d.p. (~111 km)"  ;;
+        1) GPS_PREC_LABEL="1 d.p. (~11 km)"   ;;
+        2) GPS_PREC_LABEL="2 d.p. (~1.1 km)"  ;;
+        3) GPS_PREC_LABEL="3 d.p. (~111 m)"   ;;
+        4) GPS_PREC_LABEL="4 d.p. (~11 m)"    ;;
+        5) GPS_PREC_LABEL="5 d.p. (~1.1 m)"   ;;
+        6) GPS_PREC_LABEL="6 d.p. (~0.11 m)"  ;;
     esac
     echo "  Precision: $GPS_PREC_LABEL"
 fi
