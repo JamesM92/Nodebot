@@ -492,8 +492,7 @@ EOF
 
 echo "      Written: /etc/systemd/system/nomadnet.service"
 
-# Set the NomadNet node_name to match the NodeBot broadcast name.
-# NomadNet announces this name on Reticulum so both identities are consistent.
+# Start NomadNet now so it generates its config file, then we can patch it.
 NOMADNET_CONFIG="$HOME/.nomadnetwork/config"
 BOT_NAME=$(python3 -c "
 import configparser
@@ -501,24 +500,43 @@ c = configparser.ConfigParser()
 c.read('$PROJECT_DIR/config.ini')
 print(c.get('bot', 'name', fallback='NodeBot').strip())
 ")
+echo ""
+echo "      Starting NomadNet to generate initial config..."
+sudo systemctl daemon-reload
+sudo systemctl start nomadnet
+for i in $(seq 1 20); do
+    [ -f "$NOMADNET_CONFIG" ] && break
+    sleep 1
+done
+
 if [ -f "$NOMADNET_CONFIG" ]; then
-    # Update existing node_name line
     sed -i "s/^node_name = .*/node_name = $BOT_NAME/" "$NOMADNET_CONFIG"
     echo "      NomadNet node_name set to: $BOT_NAME"
 else
-    # NomadNet hasn't been run yet — it will generate its config on first start.
-    # Record a marker so the name can be patched after first launch if needed.
-    echo "      Note: $NOMADNET_CONFIG not found yet — will be created on first NomadNet start."
-    echo "      Run: sed -i 's/^node_name = .*/node_name = $BOT_NAME/' $NOMADNET_CONFIG"
+    echo "      Warning: NomadNet config was not generated in time."
+    echo "      After first start, run:"
+    echo "        sed -i 's/^node_name = .*/node_name = $BOT_NAME/' $NOMADNET_CONFIG"
 fi
 
-# ── Step 7: Write NomadNet node page ─────────────────────────
+# ── Step 7: NomadNet node page ────────────────────────────────
 echo ""
-echo "[7/8] Writing NomadNet node page..."
+echo "[7/8] NomadNet node page"
+echo ""
+echo "  A node page lets LXMF users browse this node's addresses,"
+echo "  supported protocols, and README directly from the network."
+echo "  NomadNet will announce the page to the Reticulum network."
+echo ""
+printf "  Host a node page? (yes/no): "
+read -r HOST_PAGE || true
+echo ""
 
 PAGES_DIR="$HOME/.nomadnetwork/storage/pages"
-mkdir -p "$PAGES_DIR"
 NODE_PAGE="$PAGES_DIR/nodebot.mu"
+
+if [[ "${HOST_PAGE,,}" == "yes" ]]; then
+
+mkdir -p "$PAGES_DIR"
+echo "  Writing node page..."
 
 # Write the page as a Python script using a quoted heredoc to avoid bash
 # variable expansion inside the Python source, then patch in the two paths
@@ -709,6 +727,29 @@ if [ ! -f "$INDEX_PAGE" ]; then
 else
     echo "      Skipped: $INDEX_PAGE already exists (custom page preserved)"
     echo "      Node page accessible at: /page/nodebot.mu"
+fi
+
+# Enable node hosting in NomadNet config
+if [ -f "$NOMADNET_CONFIG" ]; then
+    sed -i "s/^enable_node = .*/enable_node = yes/" "$NOMADNET_CONFIG"
+    echo "      NomadNet node hosting enabled."
+else
+    echo "      Note: patch NomadNet config manually once generated:"
+    echo "        sed -i 's/^enable_node = .*/enable_node = yes/' $NOMADNET_CONFIG"
+fi
+
+# Restart to apply node_name + enable_node changes
+sudo systemctl restart nomadnet
+echo "      NomadNet restarted with updated config."
+
+else
+    # User declined hosting — ensure node page serving is off
+    if [ -f "$NOMADNET_CONFIG" ]; then
+        sed -i "s/^enable_node = .*/enable_node = No/" "$NOMADNET_CONFIG"
+    fi
+    echo "  Node page skipped. NomadNet will run without hosting a page."
+    echo "  To enable later: set 'enable_node = yes' in $NOMADNET_CONFIG"
+    echo "  and re-run: bash installer/install_lxmf.sh (or copy installer/nodebot.mu manually)"
 fi
 
 # ── Step 8: Install nodebot.service ──────────────────────────
