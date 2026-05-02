@@ -1,0 +1,118 @@
+# NodeBot Configuration
+# Copy this file to config.ini and edit before starting NodeBot.
+#
+#   cp config.example config.ini
+
+[rns]
+# Reticulum config directory. Leave blank to use the default (~/.reticulum).
+# Only set this if you run Reticulum from a non-standard location.
+# config_dir =
+
+[bot]
+# Display name announced on the mesh network.
+name = NodeBot
+
+# Storage path for the LXMF identity file and message queue.
+# ~ expands to the home directory of the user running NodeBot.
+storage_path = ~/.nodebot/lxmf_storage
+
+[admin]
+# One or more LXMF addresses (comma or space separated) that are permanently
+# trusted as administrators without needing a password.
+# Leave blank to use password-only admin login.
+addresses =
+
+# Admin password in plain text — hashed on first load.
+# CHANGE THIS before deploying.
+password = changeme
+
+[gps]
+# Location sharing — set by the NodeBot installer.
+# gps_mode: disabled | manual | gpsd | serial | future
+# gps_mode = disabled
+# gps_lat =
+# gps_lon =
+# gps_alt = 0
+# gps_device =
+# gps_precision = 4
+
+[meshcore]
+# Serial port for the MeshCore radio. The installer creates a stable udev
+# symlink at /dev/meshcore0 so this path survives USB reconnects.
+# IMPORTANT: this must point to a different device than [meshtastic] port.
+# port = /dev/meshcore0
+# baudrate = 115200
+
+[meshtastic]
+# Serial port for the Meshtastic radio. The installer creates a stable udev
+# symlink at /dev/meshtastic0 so this path survives USB reconnects.
+# IMPORTANT: this must point to a different device than [meshcore] port.
+# port = /dev/meshtastic0
+# baudrate = 115200
+
+# LoRa radio settings — written by the Meshtastic installer.
+# region must match your country (e.g. US, EU_868, AU_915). Leave blank to
+# skip programming (use whatever is already on the device).
+# region =
+#
+# modem_preset controls the speed/range tradeoff. Valid values:
+#   SHORT_TURBO    — fastest, not legal everywhere (500 kHz BW)
+#   SHORT_FAST
+#   SHORT_SLOW
+#   MEDIUM_FAST
+#   MEDIUM_SLOW
+#   LONG_FAST      — default, good balance of speed and range
+#   LONG_MODERATE
+#   LONG_SLOW
+#   VERY_LONG_SLOW — slowest / maximum range
+# modem_preset = LONG_FAST
+#
+# hop_limit = 7
+# tx_power = 0
+
+[telemetry]
+# Environmental data broadcast via protocols that support it (e.g. Meshtastic).
+# mode: disabled | static | script | weewx
+# mode = disabled
+
+# How often to broadcast telemetry (minutes).
+# interval_minutes = 10
+
+# static: fixed values sent every interval.
+# static_temp =        # °C
+# static_humidity =    # %
+# static_pressure =    # hPa
+
+# script: path to a script that prints JSON to stdout.
+# Output: {"temperature": 22.5, "humidity": 65.0, "pressure": 1013.25}
+# script =
+
+# weewx: path to weewx SQLite database (auto-converts Imperial→SI).
+# weewx_db = /var/lib/weewx/weewx.sdb
+
+[logging]
+# Optional append-only log files. Leave blank or omit to disable.
+# channel_log logs all public channel/broadcast messages from any transport.
+# dm_log logs all direct messages sent to this node from any transport.
+# announce_log logs node announces from all transports, including GPS coordinates
+#   (Meshtastic POSITION_APP/NODEINFO_APP, MeshCore contacts, LXMF senders).
+# ~ expands to the home directory of the user running NodeBot.
+# channel_log = ~/.nodebot/logs/channel.log
+# dm_log = ~/.nodebot/logs/dm.log
+# announce_log = ~/.nodebot/logs/announce.log
+# When true (default), LXMF announces are not logged. LXMF can receive announces
+# from TCP-connected meshes and there is no way to distinguish those from local
+# ones — leaving this true prevents log spam when a TCP uplink is active.
+# Meshtastic and MeshCore are always local serial connections, unaffected.
+# Set to false only if you want all LXMF announces logged too.
+# announce_log_local_only = true
+# Maximum size in MB per log file before oldest lines are trimmed (0 = no cap).
+# max_log_mb = 10
+
+[plugins]
+# Maximum seconds a plugin function may run before it is killed.
+# Increase for plugins that do file or network I/O (e.g. weewx weather).
+timeout_sec = 5
+
+# Minimum seconds between scans of the plugins/ directory for hot-reload.
+scan_interval = 5

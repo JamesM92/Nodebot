@@ -1,0 +1,32 @@
+# NomadNet systemd service template.
+# This file is a reference template — the live version is written to
+# /etc/systemd/system/ by installer/install_lxmf.sh with correct absolute paths.
+# Do not install this file directly; run the installer instead.
+
+[Unit]
+Description=NomadNet LXMF Node (RNS shared instance owner)
+Documentation=https://github.com/markqvist/NomadNet
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=penguin
+WorkingDirectory=/home/penguin
+
+# --daemon  : run without TUI
+# --console : log to stdout (captured by journald)
+# NomadNet is installed globally (pip3 --user), not in the project venv.
+# The installer writes the correct absolute path (~/.local/bin/nomadnet).
+ExecStart=/home/penguin/.local/bin/nomadnet --daemon --console
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
