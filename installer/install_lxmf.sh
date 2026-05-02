@@ -664,10 +664,17 @@ def md_to_micron(text):
             continue
 
         # Table data rows — flatten to text
+        # Strip backticks from cells — unknown backtick tokens eat the next char
         if line.startswith("|"):
             cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = [re.sub(r'`([^`\n]+)`', r'\1', c) for c in cells]
             out.append("  " + "   ".join(c for c in cells if c))
             continue
+
+        # Convert markdown bullets to Micron-safe bullets
+        # Micron treats any line starting with '-' as a horizontal rule
+        if re.match(r'^\s*- ', line):
+            line = re.sub(r'^(\s*)- ', r'\1+ ', line)
 
         # Inline bold and code
         line = re.sub(r'\*\*(.+?)\*\*', r'`!\1`!', line)
