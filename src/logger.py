@@ -19,8 +19,9 @@ _max_bytes = 0           # 0 = disabled; set from max_log_mb config
 _writes_since_check = 0
 _last_check = 0.0
 
-# When True, skip announce logging for LXMF (can't distinguish local vs TCP origin).
-# Meshtastic and MeshCore are always local serial connections, so they are unaffected.
+# When True, skip all LXMF announce logging. NodeBot runs as a shared-instance
+# client so all announces arrive via the same local socket — LoRa vs TCP origin
+# is indistinguishable. Set False to log all LXMF announces (LoRa and TCP alike).
 _announce_local_only = True
 
 

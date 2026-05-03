@@ -154,6 +154,7 @@ USE_TCP=false
 
 RNODE_PORTS=()
 RNODE_LABELS=()
+RNODE_FW_VERS=()
 CHOSEN_RNODE_PORT=""
 CHOSEN_RNODE_IDX=0
 
@@ -177,10 +178,13 @@ if $USE_RNODE; then
         serial=$(udev_prop "$port" "ID_SERIAL_SHORT")
         printf "  Probing %-16s [%s %s S/N:%s] ... " \
             "$port" "$vendor" "$model" "${serial:-none}"
-        if timeout 6 "$RNODECONF_BIN" "$port" --info 2>/dev/null | grep -qiE "firmware|product|rnode"; then
-            echo "rNode detected"
+        rnode_info=$(timeout 6 "$RNODECONF_BIN" "$port" --info 2>/dev/null)
+        if echo "$rnode_info" | grep -qiE "firmware|product|rnode"; then
+            fw_ver=$(echo "$rnode_info" | grep -i "Firmware version" | awk '{print $NF}')
+            echo "rNode detected (firmware ${fw_ver:-unknown})"
             RNODE_PORTS+=("$port")
             RNODE_LABELS+=("$vendor $model (S/N: ${serial:-none})")
+            RNODE_FW_VERS+=("${fw_ver:-unknown}")
         else
             echo "not an rNode"
         fi
@@ -294,6 +298,37 @@ UDEV_HEADER
         echo "      Note: $CHOSEN_RNODE_PORT will appear once the device is plugged in."
     fi
     echo ""
+
+    # ── Firmware compatibility check ─────────────────────────────
+    # Firmware 1.86 introduced a radio state response timing change
+    # that causes RNS 1.2.x to fail with "Radio state mismatch" and
+    # refuse to bring the rNode interface online.
+    # Primary fix: patch RNS to add a 0.5s sleep (applied later in
+    # step 8).  Fallback: downgrade to KNOWN_GOOD_FW if the user prefers.
+    KNOWN_GOOD_FW="1.85"
+    CHOSEN_FW="${RNODE_FW_VERS[$CHOSEN_RNODE_IDX]:-unknown}"
+    CHOSEN_PHYS="${RNODE_PORTS[$CHOSEN_RNODE_IDX]}"
+
+    _fw_newer_than() {
+        # returns 0 (true) if $1 > $2 as dot-separated version numbers
+        local a="$1" b="$2"
+        [[ "$(printf '%s\n' "$a" "$b" | sort -V | tail -1)" == "$a" && "$a" != "$b" ]]
+    }
+
+    if [[ "$CHOSEN_FW" != "unknown" ]] && _fw_newer_than "$CHOSEN_FW" "$KNOWN_GOOD_FW"; then
+        echo "  ⚠  Firmware $CHOSEN_FW detected on $CHOSEN_PHYS."
+        echo "     Firmware $CHOSEN_FW has a timing change that causes a Radio state"
+        echo "     mismatch with RNS 1.2.x.  A patch will be applied to RNS later"
+        echo "     in the install to fix this — no firmware downgrade needed."
+        echo ""
+        echo "     If you experience rNode startup failures after install, you can"
+        printf "     manually downgrade: rnodeconf %s -U --fw-version %s\n" "$CHOSEN_PHYS" "$KNOWN_GOOD_FW"
+        echo ""
+    fi
+
+    # Sign the device so future rnodeconf operations work without
+    # the "unverified device" warning blocking flashes/updates.
+    "$RNODECONF_BIN" "$CHOSEN_PHYS" --sign 2>/dev/null || true
 else
     echo "[4/8] Skipping udev setup (no rNode configured)."
 fi
@@ -382,6 +417,21 @@ if $USE_TCP; then
     echo ""
 fi
 
+# ── Transport / bridging ─────────────────────────────
+ENABLE_TRANSPORT=false
+if $USE_RNODE && $USE_TCP; then
+    echo "  ── Network transport ────────────────────────────────"
+    echo ""
+    echo "  Enable Reticulum transport? This forwards packets between"
+    echo "  the LoRa (rNode) and TCP interfaces, bridging them so that"
+    echo "  LoRa mesh traffic reaches the TCP network and vice versa."
+    echo ""
+    printf "  Enable transport / bridging? (yes/no): "
+    read -r TRANSPORT_ANS || true
+    [[ "${TRANSPORT_ANS,,}" == "yes" ]] && ENABLE_TRANSPORT=true
+    echo ""
+fi
+
 echo "  ── Selected configuration ──────────────────────────"
 if $USE_RNODE; then
     printf "  Device      : %s\n" "$CHOSEN_RNODE_PORT"
@@ -412,12 +462,15 @@ else
         HEADER_COMMENT="# TCP-only mode — no LoRa radio hardware"
     fi
 
+    RNS_TRANSPORT_VALUE="False"
+    $ENABLE_TRANSPORT && RNS_TRANSPORT_VALUE="True"
+
     cat > "$RNS_CONFIG" <<RNSEOF
 # Reticulum configuration — written by NodeBot LXMF installer
 $HEADER_COMMENT
 
 [reticulum]
-  enable_transport = False
+  enable_transport = $RNS_TRANSPORT_VALUE
   share_instance = Yes
   shared_instance_port = 37428
   instance_control_port = 37429
@@ -518,9 +571,25 @@ else
     echo "        sed -i 's/^node_name = .*/node_name = $BOT_NAME/' $NOMADNET_CONFIG"
 fi
 
-# ── Step 7: NomadNet node page ────────────────────────────────
+# ── Step 7: NomadNet node page + propagation node ────────────
 echo ""
-echo "[7/8] NomadNet node page"
+echo "[7/8] NomadNet node configuration"
+echo ""
+
+# Propagation node prompt
+echo "  ── LXMF propagation node ───────────────────────────"
+echo ""
+echo "  A propagation node stores and forwards LXMF messages for"
+echo "  nodes that are temporarily offline. It also bridges messages"
+echo "  between LoRa and TCP — nodes on LoRa can receive messages"
+echo "  sent via TCP, and vice versa."
+echo ""
+printf "  Run as an LXMF propagation node? (yes/no): "
+read -r RUN_PROP_NODE || true
+echo ""
+
+# Node page prompt
+echo "  ── Node page ───────────────────────────────────────"
 echo ""
 echo "  A node page lets LXMF users browse this node's addresses,"
 echo "  supported protocols, and README directly from the network."
@@ -745,18 +814,101 @@ else
     echo "        sed -i 's/^enable_node = .*/enable_node = yes/' $NOMADNET_CONFIG"
 fi
 
-# Restart to apply node_name + enable_node changes
-sudo systemctl restart nomadnet
-echo "      NomadNet restarted with updated config."
-
 else
     # User declined hosting — ensure node page serving is off
     if [ -f "$NOMADNET_CONFIG" ]; then
         sed -i "s/^enable_node = .*/enable_node = No/" "$NOMADNET_CONFIG"
     fi
-    echo "  Node page skipped. NomadNet will run without hosting a page."
+    echo "  Node page skipped. NomadNet will run without a hosted page."
     echo "  To enable later: set 'enable_node = yes' in $NOMADNET_CONFIG"
-    echo "  and re-run: bash installer/install_lxmf.sh (or copy installer/nodebot.mu manually)"
+fi
+
+# Apply propagation node setting
+if [ -f "$NOMADNET_CONFIG" ]; then
+    if [[ "${RUN_PROP_NODE,,}" == "yes" ]]; then
+        sed -i "s/^disable_propagation = .*/disable_propagation = No/" "$NOMADNET_CONFIG"
+        echo "  LXMF propagation node enabled."
+    else
+        sed -i "s/^disable_propagation = .*/disable_propagation = Yes/" "$NOMADNET_CONFIG"
+        echo "  LXMF propagation node disabled."
+    fi
+else
+    echo "  Note: set 'disable_propagation = No' in $NOMADNET_CONFIG to enable propagation node."
+fi
+
+# ── RNS firmware 1.86 compatibility patch ────────────────────
+# Firmware 1.86+ takes slightly longer to confirm RADIO_STATE_ON.
+# RNS 1.2.x calls validateRadioState() immediately after initRadio()
+# with no gap, causing a spurious "Radio state mismatch" failure.
+# A 0.5s sleep between the two calls resolves this.  The patch is
+# applied to both the NodeBot venv and the system RNS used by
+# NomadNet.  Applied here (before NomadNet restart) so it is active
+# on first boot, and re-applied on each install run to survive
+# 'pip upgrade rns'.
+_patch_rns_interface() {
+    local rns_iface="$1"
+    [ -f "$rns_iface" ] || return 0
+    if grep -q "Allow firmware time to confirm RADIO_STATE_ON" "$rns_iface"; then
+        echo "  Already patched: $rns_iface"
+        return 0
+    fi
+    # Insert sleep(0.5) between initRadio() and validateRadioState()
+    sed -i 's/^\( *\)self\.initRadio()\( *\)$/\1self.initRadio()\n\1sleep(0.5)  # Allow firmware time to confirm RADIO_STATE_ON (needed for fw >= 1.86)/' \
+        "$rns_iface" && echo "  Patched: $rns_iface" || echo "  Patch failed: $rns_iface"
+}
+
+echo ""
+echo "Applying RNS rNode firmware compatibility patch..."
+VENV_RNS_IFACE="$VENV_DIR/lib/python*/site-packages/RNS/Interfaces/RNodeInterface.py"
+SYS_RNS_IFACE=$(python3 -c "import RNS, os; print(os.path.join(os.path.dirname(RNS.__file__), 'Interfaces', 'RNodeInterface.py'))" 2>/dev/null || true)
+
+for f in $VENV_RNS_IFACE; do _patch_rns_interface "$f"; done
+[ -n "$SYS_RNS_IFACE" ] && _patch_rns_interface "$SYS_RNS_IFACE"
+
+# Restart nomadnet to apply all config changes (with RNS patch already in place)
+sudo systemctl restart nomadnet
+echo "  NomadNet restarted with updated config."
+
+# ── rNode interface sanity check ─────────────────────────────
+if $USE_RNODE; then
+    echo ""
+    echo "  Checking rNode interface..."
+    RNODE_OK=false
+    for i in $(seq 1 15); do
+        if journalctl -u nomadnet -n 50 --no-pager 2>/dev/null \
+                | grep -q "is configured and powered up"; then
+            RNODE_OK=true
+            break
+        fi
+        sleep 1
+    done
+
+    if $RNODE_OK; then
+        echo "  ✓ rNode interface is up."
+    else
+        # Check for the known firmware mismatch error
+        if journalctl -u nomadnet -n 50 --no-pager 2>/dev/null \
+                | grep -q "Radio state mismatch"; then
+            echo ""
+            echo "  ✗ ERROR: Radio state mismatch — rNode firmware timing"
+            echo "    incompatibility with RNS 1.2.x. The RNS patch should"
+            echo "    have fixed this; it may not have taken effect yet."
+            echo ""
+            echo "    Try restarting NomadNet manually:"
+            echo "      sudo systemctl restart nomadnet"
+            echo ""
+            echo "    If the error persists, downgrade the firmware:"
+            echo "      sudo systemctl stop nomadnet"
+            printf "      rnodeconf %s --sign\n" \
+                "${RNODE_PORTS[$CHOSEN_RNODE_IDX]:-/dev/rnode0}"
+            printf "      rnodeconf %s -U --fw-version %s\n" \
+                "${RNODE_PORTS[$CHOSEN_RNODE_IDX]:-/dev/rnode0}" "$KNOWN_GOOD_FW"
+            echo "      sudo systemctl start nomadnet"
+        else
+            echo "  ⚠  rNode interface did not come up within 15 seconds."
+            echo "     Check: journalctl -u nomadnet -n 30"
+        fi
+    fi
 fi
 
 # ── Step 8: Install nodebot.service ──────────────────────────

@@ -32,7 +32,7 @@ echo "================================================"
 echo ""
 
 # ── Step 1: System packages ───────────────────────────────────
-echo "[1/6] Checking system packages..."
+echo "[1/7] Checking system packages..."
 MISSING=()
 command -v python3 >/dev/null 2>&1 || MISSING+=("python3")
 command -v pip3    >/dev/null 2>&1 || MISSING+=("python3-pip")
@@ -53,7 +53,7 @@ if ! command -v nc >/dev/null 2>&1; then
 fi
 
 # ── Step 2: Virtual environment ───────────────────────────────
-echo "[2/6] Setting up virtual environment..."
+echo "[2/7] Setting up virtual environment..."
 
 if [ ! -d "$VENV" ]; then
     if command -v uv >/dev/null 2>&1; then
@@ -72,7 +72,7 @@ find "$VENV/bin" -type f ! -perm /111 -exec chmod +x {} \;
 echo "  Permissions fixed."
 
 # ── Step 3: Python dependencies ───────────────────────────────
-echo "[3/6] Installing Python dependencies..."
+echo "[3/7] Installing Python dependencies..."
 
 if command -v uv >/dev/null 2>&1 && [ -f "$PROJECT_DIR/uv.lock" ]; then
     echo "  Using uv sync..."
@@ -86,7 +86,7 @@ fi
 echo "  Dependencies installed."
 
 # ── Step 4: Storage directory ─────────────────────────────────
-echo "[4/6] Creating storage directory..."
+echo "[4/7] Creating storage directory..."
 mkdir -p "$HOME/.nodebot/lxmf_storage"
 echo "  $HOME/.nodebot/lxmf_storage"
 
@@ -123,8 +123,77 @@ pick() {
     done
 }
 
-# ── Step 5: GPS configuration ────────────────────────────────
-echo "[5/6] GPS location configuration"
+# ── Step 5: Admin password ───────────────────────────────────
+echo "[5/7] Admin password"
+echo ""
+echo "  Set the admin password for NodeBot."
+echo "  This is required to use admin commands (e.g. !admin, lockdown)."
+echo "  Minimum 8 characters."
+echo ""
+
+# Check if password has already been changed from the default
+_CURRENT_PW=$("$VENV_PYTHON" -c "
+import configparser, sys
+c = configparser.ConfigParser()
+c.read(sys.argv[1])
+print(c.get('admin', 'password', fallback='changeme'))
+" "$CONFIG_INI" 2>/dev/null || echo "changeme")
+
+if [ "$_CURRENT_PW" != "changeme" ]; then
+    echo "  Admin password is already set (non-default)."
+    printf "  Change it now? [y/N]: "
+    read -r _PW_CHANGE || true
+    _PW_CHANGE="${_PW_CHANGE:-N}"
+    if [[ ! "$_PW_CHANGE" =~ ^[Yy]$ ]]; then
+        echo "  Keeping existing password."
+        _SKIP_PW=true
+    else
+        _SKIP_PW=false
+    fi
+else
+    _SKIP_PW=false
+fi
+
+if [ "$_SKIP_PW" = false ]; then
+    while true; do
+        printf "  New admin password: "
+        read -rs _PW1 || true
+        echo ""
+        if [ ${#_PW1} -lt 8 ]; then
+            echo "  Password must be at least 8 characters. Try again."
+            continue
+        fi
+        printf "  Confirm password:   "
+        read -rs _PW2 || true
+        echo ""
+        if [ "$_PW1" != "$_PW2" ]; then
+            echo "  Passwords do not match. Try again."
+            continue
+        fi
+        break
+    done
+
+    printf '%s' "$_PW1" | "$VENV_PYTHON" - "$CONFIG_INI" <<'PYEOF'
+import configparser, sys
+
+path = sys.argv[1]
+new_pw = sys.stdin.read()
+c = configparser.ConfigParser()
+c.read(path)
+if not c.has_section('admin'):
+    c.add_section('admin')
+c.set('admin', 'password', new_pw)
+with open(path, 'w') as f:
+    c.write(f)
+print("  Admin password updated in config.ini")
+PYEOF
+
+    unset _PW1 _PW2
+fi
+echo ""
+
+# ── Step 6: GPS configuration ────────────────────────────────
+echo "[6/7] GPS location configuration"
 echo ""
 echo "  NodeBot can share your location on the network."
 echo "  Any protocol that supports GPS (e.g. MeshCore) will use this setting."
@@ -483,7 +552,7 @@ fi
 echo ""
 
 # ── Step 6: Install nodebot.service ──────────────────────────
-echo "[6/6] Installing nodebot.service..."
+echo "[7/7] Installing nodebot.service..."
 
 sudo tee /etc/systemd/system/nodebot.service > /dev/null <<EOF
 [Unit]
@@ -518,6 +587,7 @@ echo "================================================"
 echo "  Installation complete."
 echo "================================================"
 echo ""
+printf "  Admin pw  : %s\n" "$( [ "${_SKIP_PW:-false}" = true ] && echo "unchanged" || echo "set" )"
 printf "  GPS       : %s\n" "$GPS_LABEL"
 if [[ "$GPS_MODE" != "disabled" ]]; then
     printf "  Precision : %s\n" "$GPS_PREC_LABEL"
@@ -529,6 +599,15 @@ echo ""
 echo "  View logs:"
 echo "    journalctl -u nodebot -f"
 echo ""
-echo "  To add NomadNet / LXMF / rNode support:"
-echo "    bash installer/install_lxmf.sh"
+echo "  To add protocol support, plug in the radio device first,"
+echo "  then run the relevant installer:"
+echo ""
+echo "    NomadNet / LXMF / rNode:"
+echo "      bash installer/install_lxmf.sh"
+echo ""
+echo "    Meshtastic:"
+echo "      bash installer/install_meshtastic.sh"
+echo ""
+echo "    MeshCore:"
+echo "      bash installer/install_meshcore.sh"
 echo ""

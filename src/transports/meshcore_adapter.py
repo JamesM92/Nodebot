@@ -121,16 +121,30 @@ class MeshCoreAdapter:
                     cx = SerialConnection(self.port, self.baudrate)
                     self._mc = MeshCore(cx, auto_reconnect=True, max_reconnect_attempts=0)
 
-                    await self._mc.connect()
+                    # Subscribe before connect so _on_self_info fires when
+                    # send_appstart() triggers SELF_INFO during the handshake.
+                    self._mc.subscribe(EventType.SELF_INFO, self._on_self_info)
+
+                    conn_result = await self._mc.connect()
+                    if conn_result is None:
+                        raise RuntimeError(
+                            f"MeshCore handshake timed out on {self.port} — "
+                            f"device did not respond to APP_START. "
+                            f"If an rNode is also connected, check that the devices "
+                            f"are not swapped (wrong device in wrong USB port)."
+                        )
                     print(f"[meshcore_adapter] connected to {self.port}")
                     _retry = 0  # reset backoff on successful connect
+
+                    # Yield to the event loop so pending async callbacks
+                    # (_on_self_info) can run before the rest of setup.
+                    await asyncio.sleep(0.2)
 
                     await self._mc.ensure_contacts()
                     print(f"[meshcore_adapter] contacts loaded: {len(self._mc.contacts)}")
 
                     await self._query_channels()
                     await self._set_node_name()
-                    self._save_node_info()
                     await self._set_gps_location()
                     await self._announce_async()
 
@@ -210,11 +224,16 @@ class MeshCoreAdapter:
         except Exception as e:
             print(f"[meshcore_adapter] could not set node name: {e}")
 
-    def _save_node_info(self):
+    async def _on_self_info(self, event):
+        self._save_node_info(getattr(event, "payload", None))
+
+    def _save_node_info(self, info=None):
         try:
-            info = self._mc.self_info if self._mc else {}
-            pubkey = info.get("public_key", "")
+            if info is None:
+                info = self._mc.self_info if self._mc else {}
+            pubkey = info.get("public_key", "") if info else ""
             if not pubkey:
+                print(f"[meshcore_adapter] public_key not available in self_info")
                 return
             import json as _json
             path = os.path.join(self.storage_path, "meshcore_node.json")
@@ -233,6 +252,13 @@ class MeshCoreAdapter:
         mode = self._gps_mode
         if mode == "disabled" or mode == "future":
             return
+
+        # Enable location sharing in advertisements (adv_loc_policy=1)
+        try:
+            await self._mc.commands.set_advert_loc_policy(1)
+            print("[meshcore_adapter] GPS: location sharing enabled (adv_loc_policy=1)")
+        except Exception as e:
+            print(f"[meshcore_adapter] GPS: could not set advert_loc_policy: {e}")
 
         lat = lon = alt = None
 
@@ -280,10 +306,11 @@ class MeshCoreAdapter:
             return
 
         try:
-            await self._mc.commands.set_coords(lat_r, lon_r, alt_r)
+            await self._mc.commands.set_coords(lat_r, lon_r)
             self._last_gps_lat = lat_r
             self._last_gps_lon = lon_r
             print(f"[meshcore_adapter] GPS pushed: lat={lat_r} lon={lon_r} alt={alt_r}")
+            await self._mc.commands.send_advert()
         except Exception as e:
             print(f"[meshcore_adapter] GPS: set_coords failed: {e}")
 
@@ -701,6 +728,7 @@ class MeshCoreAdapter:
     async def _send_async(self, pubkey_prefix, content):
 
         try:
+            from meshcore.events import EventType
             if not self._mc:
                 return False
 
@@ -709,7 +737,10 @@ class MeshCoreAdapter:
                 print(f"[meshcore_adapter] no contact for {pubkey_prefix}, dropping")
                 return False
 
-            await self._mc.commands.send_msg(contact, content)
+            result = await self._mc.commands.send_msg_with_retry(contact, content)
+            if result.type == EventType.ERROR:
+                print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {result.payload}")
+                return False
             print(f"[meshcore_adapter] sent to {pubkey_prefix}")
             return True
 

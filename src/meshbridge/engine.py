@@ -77,6 +77,7 @@ class NodeBot:
         self.state["stats"]["per_user"][sender] += 1
 
         sender_key = sender.hex() if isinstance(sender, (bytes, bytearray)) else str(sender)
+        is_first = sender_key not in self.state["seen"]
         self.state["seen"][sender_key] = time.time()
         if nick:
             self.state["nicks"][sender_key] = nick
@@ -104,7 +105,14 @@ class NodeBot:
             return
 
         # 2. Non-command plugin hooks (relay auto-forward)
-        self._handle_plugins(sender, message, send_callback)
+        plugin_handled = self._handle_plugins(sender, message, send_callback)
+
+        # 3. First-message greeting — send help if the user's first message
+        # wasn't a recognized command and no plugin handled it.
+        if not plugin_handled and is_first:
+            response, _ = commands.handle_command("help", sender)
+            if response:
+                self._send_chunked(sender, str(response), send_callback, transport)
 
     def _send_chunked(self, sender, text, send_callback, transport):
         """Split text for the transport's limit and call send_callback per chunk."""
@@ -125,15 +133,16 @@ class NodeBot:
         import sys
         relay_mod = sys.modules.get("plugins.relay")
         if relay_mod is None:
-            return
+            return False
 
         session_key, _ = relay_mod._resolve_session(sender)
         if not session_key:
-            return
+            return False
 
         forwarded = relay_mod.auto_forward(sender, message)
         if not forwarded:
             send_callback(sender, "Relay active. Use: Respond: <message>")
+        return True
 
     # =====================================================
     # LOCKDOWN

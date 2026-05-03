@@ -172,6 +172,48 @@ class LXMFAdapter:
                 RNS.LOG_NOTICE
             )
 
+            # Register an RNS announce handler so we log nodes that announce
+            # themselves even if they never send a message.
+            adapter = self
+
+            class _AnnounceHandler:
+                aspect_filter = "lxmf.delivery"
+
+                def received_announce(self, destination_hash, announced_identity,
+                                      app_data, announce_packet_hash=None, **kwargs):
+                    try:
+                        addr_hex = destination_hash.hex()
+                        if destination_hash == adapter.delivery_destination.hash:
+                            return
+                        if addr_hex in adapter._announced_lxmf:
+                            return
+                        if adapter._announce_local_only:
+                            # NodeBot runs as a shared-instance client — all
+                            # announces arrive via LocalClientInterface so the
+                            # TCP/LoRa origin is not visible from here.  When
+                            # local-only mode is on, skip all LXMF announces to
+                            # prevent TCP-mesh spam.  Set
+                            # announce_log_local_only = false to log them all.
+                            return
+                        adapter._announced_lxmf.add(addr_hex)
+                        nick = None
+                        if app_data:
+                            try:
+                                nick = app_data.decode("utf-8", errors="ignore").strip() or None
+                            except Exception:
+                                pass
+                        logger.log_announce("lxmf", addr_hex, nick=nick)
+                        RNS.log(f"[lxmf_adapter] logged announce for {addr_hex}", RNS.LOG_NOTICE)
+                    except Exception as e:
+                        RNS.log(
+                            f"[lxmf_adapter] announce handler error: {e}",
+                            RNS.LOG_WARNING
+                        )
+
+            self._announce_handler = _AnnounceHandler()
+            RNS.Transport.register_announce_handler(self._announce_handler)
+            RNS.log("[lxmf_adapter] announce handler registered", RNS.LOG_NOTICE)
+
         except Exception as e:
             RNS.log(f"[lxmf_adapter] router init failed: {e}", RNS.LOG_ERROR)
             raise
@@ -272,14 +314,24 @@ class LXMFAdapter:
             source = getattr(message, "source", None)
             if source is not None:
                 self._sources[sender_hash] = source
+            else:
+                # Identity unknown — request path immediately so the announce
+                # arrives before we try to send the reply.
+                try:
+                    RNS.Transport.request_path(sender_hash)
+                    RNS.log(
+                        f"[lxmf_adapter] source identity unknown, requested path for {RNS.prettyhexrep(sender_hash)}",
+                        RNS.LOG_NOTICE
+                    )
+                except Exception as e:
+                    RNS.log(f"[lxmf_adapter] path request failed: {e}", RNS.LOG_WARNING)
 
             # Log to announce file the first time we hear from this address,
             # subject to the local-only filter.
             addr_hex = sender_hash.hex()
-            if addr_hex not in self._announced_lxmf:
+            if addr_hex not in self._announced_lxmf and not self._announce_local_only:
                 self._announced_lxmf.add(addr_hex)
-                if not self._announce_local_only or self._is_local_path(sender_hash):
-                    logger.log_announce("lxmf", addr_hex)
+                logger.log_announce("lxmf", addr_hex)
 
             RNS.log(
                 f"[lxmf_adapter] msg from {RNS.prettyhexrep(sender_hash)}: {content!r}",
@@ -322,26 +374,33 @@ class LXMFAdapter:
             dest = self._sources.get(destination_hash)
 
             if dest is None:
-                # Fallback: try to recall the identity for this delivery hash
+                # Fallback: try to recall the identity for a direct path
                 dest_identity = RNS.Identity.recall(destination_hash)
-                if dest_identity is None:
-                    RNS.log(
-                        f"[lxmf_adapter] no route to {RNS.prettyhexrep(destination_hash)}, dropping",
-                        RNS.LOG_WARNING
+                if dest_identity is not None:
+                    dest = RNS.Destination(
+                        dest_identity,
+                        RNS.Destination.OUT,
+                        RNS.Destination.SINGLE,
+                        "lxmf",
+                        "delivery"
                     )
-                    if notify_cb:
-                        notify_cb(False)
-                    return
-                dest = RNS.Destination(
-                    dest_identity,
-                    RNS.Destination.OUT,
-                    RNS.Destination.SINGLE,
-                    "lxmf",
-                    "delivery"
-                )
 
             if isinstance(content, bytes):
                 content = content.decode("utf-8", errors="ignore")
+
+            if dest is None:
+                # Identity still unknown after message receipt — request path
+                # and retry in a background thread (sender is likely online).
+                RNS.log(
+                    f"[lxmf_adapter] identity unknown for {RNS.prettyhexrep(destination_hash)}, queuing with path request",
+                    RNS.LOG_NOTICE
+                )
+                threading.Thread(
+                    target=self._path_request_send,
+                    args=(destination_hash, content, notify_cb),
+                    daemon=True
+                ).start()
+                return
 
             msg = LXMF.LXMessage(
                 dest,
@@ -366,6 +425,56 @@ class LXMFAdapter:
             RNS.log(f"[lxmf_adapter] send failed: {e}", RNS.LOG_ERROR)
             if notify_cb:
                 notify_cb(False)
+
+    def _path_request_send(self, destination_hash, content, notify_cb,
+                           retries=6, delay=5):
+        """
+        Request a path to destination_hash, then retry sending once the
+        identity is known.  Runs in a daemon thread so it never blocks the
+        main worker.  Covers the case where a message arrives via a
+        propagation relay before the sender's announce has reached us.
+        """
+        try:
+            RNS.Transport.request_path(destination_hash)
+        except Exception as e:
+            RNS.log(f"[lxmf_adapter] path request error: {e}", RNS.LOG_WARNING)
+
+        for attempt in range(retries):
+            time.sleep(delay)
+            dest_identity = RNS.Identity.recall(destination_hash)
+            if dest_identity is not None:
+                dest = RNS.Destination(
+                    dest_identity,
+                    RNS.Destination.OUT,
+                    RNS.Destination.SINGLE,
+                    "lxmf",
+                    "delivery"
+                )
+                if isinstance(content, bytes):
+                    content = content.decode("utf-8", errors="ignore")
+                msg = LXMF.LXMessage(
+                    dest,
+                    self.delivery_destination,
+                    content,
+                    desired_method=LXMF.LXMessage.DIRECT
+                )
+                if notify_cb:
+                    def _on_delivery(message):
+                        notify_cb(message.state == LXMF.LXMessage.DELIVERED)
+                    msg.delivery_callback = _on_delivery
+                self.router.handle_outbound(msg)
+                RNS.log(
+                    f"[lxmf_adapter] sent to {RNS.prettyhexrep(destination_hash)} after path discovery (attempt {attempt+1})",
+                    RNS.LOG_NOTICE
+                )
+                return
+
+        RNS.log(
+            f"[lxmf_adapter] gave up waiting for path to {RNS.prettyhexrep(destination_hash)}",
+            RNS.LOG_WARNING
+        )
+        if notify_cb:
+            notify_cb(False)
 
     # =====================================================
     # HEALTH

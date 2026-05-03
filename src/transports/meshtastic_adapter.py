@@ -64,7 +64,6 @@ class MeshtasticAdapter:
         self._tel_mode     = cfg.get("telemetry", "mode",             fallback="disabled").strip()
         self._tel_interval = int(cfg.get("telemetry", "interval_minutes", fallback="10").strip()) * 60
         self._tel_script   = cfg.get("telemetry", "script",           fallback="").strip()
-        self._tel_weewx    = cfg.get("telemetry", "weewx_db",         fallback="/var/lib/weewx/weewx.sdb").strip()
         self._tel_static   = {
             "temperature": cfg.get("telemetry", "static_temp",     fallback="").strip(),
             "humidity":    cfg.get("telemetry", "static_humidity",  fallback="").strip(),
@@ -465,7 +464,7 @@ class MeshtasticAdapter:
             return
 
         try:
-            self._iface.localNode.setPosition(lat_r, lon_r, int(alt_r))
+            self._iface.localNode.setFixedPosition(lat_r, lon_r, int(alt_r))
             self._last_gps_lat = lat_r
             self._last_gps_lon = lon_r
             self._last_gps_alt = int(alt_r)
@@ -577,9 +576,6 @@ class MeshtasticAdapter:
         elif mode == "script":
             return self._run_telemetry_script()
 
-        elif mode == "weewx":
-            return self._read_weewx()
-
         return None
 
     def _run_telemetry_script(self):
@@ -592,40 +588,6 @@ class MeshtasticAdapter:
             return json.loads(result.stdout.strip())
         except Exception as e:
             print(f"[meshtastic_adapter] telemetry script error: {e}")
-            return None
-
-    def _read_weewx(self):
-        import sqlite3
-        try:
-            conn = sqlite3.connect(self._tel_weewx)
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT usUnits, outTemp, outHumidity, barometer "
-                "FROM archive ORDER BY dateTime DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            conn.close()
-            if not row:
-                return None
-
-            data = {}
-            us_units = row["usUnits"] == 1  # 1=US/Imperial, 16=metric
-
-            if row["outTemp"] is not None:
-                t = row["outTemp"]
-                data["temperature"] = round((t - 32) * 5 / 9, 2) if us_units else round(t, 2)
-
-            if row["outHumidity"] is not None:
-                data["humidity"] = round(row["outHumidity"], 1)
-
-            if row["barometer"] is not None:
-                p = row["barometer"]
-                data["pressure"] = round(p * 33.8639, 2) if us_units else round(p, 2)
-
-            return data or None
-
-        except Exception as e:
-            print(f"[meshtastic_adapter] weewx read error: {e}")
             return None
 
     # =====================================================
@@ -669,7 +631,7 @@ class MeshtasticAdapter:
                 self._save_lora_state()
                 print(f"[meshtastic_adapter] node name set: {self._node_name}")
             if self._last_gps_lat is not None:
-                self._iface.localNode.setPosition(
+                self._iface.localNode.setFixedPosition(
                     self._last_gps_lat, self._last_gps_lon, self._last_gps_alt or 0
                 )
             print("[meshtastic_adapter] announced on network")

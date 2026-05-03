@@ -196,6 +196,7 @@ id_serial_short=$(udev_prop "$CHOSEN_PORT" "ID_SERIAL_SHORT")
 id_path=$(udev_prop "$CHOSEN_PORT" "ID_PATH")
 id_vendor=$(udev_prop "$CHOSEN_PORT" "ID_VENDOR_ID")
 id_model_id=$(udev_prop "$CHOSEN_PORT" "ID_MODEL_ID")
+DRIVER_BIND_RULE=""  # populated only for non-standard product IDs
 
 echo "  Device : $CHOSEN_PORT — ${MESHCORE_LABELS[$CHOSEN_IDX]}"
 
@@ -271,6 +272,18 @@ elif [[ "$id_vendor" == "1a86" ]]; then
     echo "  This chip has a unique USB vendor/product ID."
     echo "  Symlink is permanently port-independent — works across any USB socket."
 
+elif [[ "$id_vendor" == "10c4" && "$id_model_id" != "ea60" ]]; then
+    # CP210x with a non-standard product ID (e.g. 0000) — the product ID itself
+    # uniquely distinguishes this device from standard CP2102 (ea60) devices such
+    # as rNodes. Use vendor+product to match it port-independently.
+    # Also inject the new_id so the cp210x driver binds on plug (non-standard PID
+    # is not in the driver's built-in table).
+    echo "  CP210x with non-standard product ID ${id_model_id} detected."
+    echo "  Using vendor+product ID for port-independent matching."
+    DRIVER_BIND_RULE="ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"${id_model_id}\", RUN+=\"/bin/sh -c 'echo 10c4 ${id_model_id} > /sys/bus/usb-serial/drivers/cp210x/new_id'\""
+    RULE="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"${id_model_id}\", SYMLINK+=\"meshcore0\""
+    echo "  Symlink is permanently port-independent — works in any USB socket."
+
 elif [[ "$id_vendor" == "10c4" ]]; then
     # Silicon Labs CP210x with generic serial — attempt to program a unique one
     echo "  CP210x with generic serial '${id_serial_short}' detected."
@@ -302,14 +315,60 @@ fi
 
 echo "  Rule: $RULE"
 
-sudo tee "$UDEV_RULES" > /dev/null <<UDEV
-# MeshCore stable device naming — written by NodeBot MeshCore installer
-# Creates /dev/meshcore0 tied to device identity.
-# Device reconnects automatically when replugged.
+# ── Conflict check — ensure this device isn't already claimed by another rule ──
+# Extract the match value from the new rule so we can search for it in other rule files.
+# We only need to flag when two symlink rules share the same hardware identity string,
+# which would cause both symlinks to point at the same physical device.
+_rule_match_value=""
+if [[ "$RULE" == *"ID_PATH=="* ]]; then
+    _rule_match_value=$(echo "$RULE" | grep -oP '(?<=ID_PATH==")[^"]+')
+elif [[ "$RULE" == *"ID_SERIAL=="* ]]; then
+    _rule_match_value=$(echo "$RULE" | grep -oP '(?<=ID_SERIAL==")[^"]+')
+elif [[ "$RULE" == *'ATTRS{serial}=='* ]]; then
+    _rule_match_value=$(echo "$RULE" | grep -oP '(?<=ATTRS\{serial\}==")[^"]+')
+fi
 
-# Device: $CHOSEN_PORT — ${MESHCORE_LABELS[$CHOSEN_IDX]}
-$RULE
-UDEV
+if [[ -n "$_rule_match_value" ]]; then
+    _conflict_files=()
+    for _rf in /etc/udev/rules.d/*.rules; do
+        [[ "$_rf" == "$UDEV_RULES" ]] && continue
+        grep -q "$_rule_match_value" "$_rf" 2>/dev/null && _conflict_files+=("$_rf")
+    done
+    if (( ${#_conflict_files[@]} > 0 )); then
+        echo ""
+        echo "  ╔══════════════════════════════════════════════════════╗"
+        echo "  ║                  ⚠  PORT CONFLICT  ⚠                 ║"
+        echo "  ╚══════════════════════════════════════════════════════╝"
+        echo ""
+        echo "  The selected device shares its USB identity with an existing rule:"
+        for _rf in "${_conflict_files[@]}"; do
+            echo "    $_rf"
+        done
+        echo ""
+        echo "  Both /dev/meshcore0 and the existing symlink would point to the"
+        echo "  SAME physical device, meaning NodeBot would talk to the wrong radio."
+        echo ""
+        echo "  Fix: plug the MeshCore device into a DIFFERENT USB port than the"
+        echo "  rNode / other radio, then re-run this installer."
+        echo ""
+        echo "  Aborting."
+        exit 1
+    fi
+fi
+
+(
+  echo "# MeshCore stable device naming — written by NodeBot MeshCore installer"
+  echo "# Creates /dev/meshcore0 tied to device identity."
+  echo "# Device reconnects automatically when replugged."
+  if [[ -z "$DRIVER_BIND_RULE" ]]; then
+    echo "# NOTE: Keep this device in its designated USB port."
+    echo "#       If you move it, re-run install_meshcore.sh to update this rule."
+  fi
+  echo ""
+  echo "# Device: $CHOSEN_PORT — ${MESHCORE_LABELS[$CHOSEN_IDX]}"
+  [[ -n "$DRIVER_BIND_RULE" ]] && echo "$DRIVER_BIND_RULE"
+  echo "$RULE"
+) | sudo tee "$UDEV_RULES" > /dev/null
 
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -321,6 +380,18 @@ if [ -e "/dev/meshcore0" ]; then
     ACTIVE_PORT="/dev/meshcore0"
 else
     echo "  Note: /dev/meshcore0 will appear once the device is plugged in."
+fi
+
+# Final sanity check — warn if meshcore0 and rnode0 resolve to the same device
+if [ -e "/dev/meshcore0" ] && [ -e "/dev/rnode0" ]; then
+    _mc_real=$(readlink -f /dev/meshcore0 2>/dev/null)
+    _rn_real=$(readlink -f /dev/rnode0 2>/dev/null)
+    if [[ "$_mc_real" == "$_rn_real" && -n "$_mc_real" ]]; then
+        echo ""
+        echo "  ⚠  WARNING: /dev/meshcore0 and /dev/rnode0 both resolve to $_mc_real"
+        echo "  The devices appear to be on the same USB port — NodeBot will malfunction."
+        echo "  Move one device to a different port and re-run this installer."
+    fi
 fi
 echo ""
 
@@ -460,8 +531,15 @@ path, baud = sys.argv[1], sys.argv[2]
 with open(path) as f:
     content = f.read()
 
-content = re.sub(r'(?m)^#?\s*port\s*=.*$',     'port = /dev/meshcore0', content)
-content = re.sub(r'(?m)^#?\s*baudrate\s*=.*$', f'baudrate = {baud}',    content)
+def replace_in_section(text, section, key, value):
+    """Replace key = ... only within the named section block."""
+    def replacer(m):
+        block = re.sub(r'(?m)^#?\s*' + re.escape(key) + r'\s*=.*$', key + ' = ' + value, m.group(1))
+        return block
+    return re.sub(r'(\[' + re.escape(section) + r'\].*?)(?=\n\[|\Z)', replacer, text, flags=re.DOTALL)
+
+content = replace_in_section(content, 'meshcore', 'port',     '/dev/meshcore0')
+content = replace_in_section(content, 'meshcore', 'baudrate', baud)
 
 with open(path, 'w') as f:
     f.write(content)

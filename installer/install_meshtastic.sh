@@ -55,6 +55,53 @@ echo "[1/5] Installing meshtastic Python package..."
 "$VENV_PIP" install --upgrade meshtastic
 echo "      meshtastic $("$VENV_PIP" show meshtastic 2>/dev/null | awk '/^Version:/{print $2}') installed."
 
+# ── CP210x 0000:0000 driver registration ─────────────────────
+# Some Meshtastic devices (e.g. Heltec v3 with corrupted CP210x serial) present
+# as 0000:0000 and are not bound to the cp210x driver by default. Detect and
+# register them before scanning for ttyUSB ports.
+_CP210X_NEW_ID="/sys/bus/usb-serial/drivers/cp210x/new_id"
+_ZERO_DEV=""
+for _usb_dev in /sys/bus/usb/devices/*/idVendor; do
+    _dir="$(dirname "$_usb_dev")"
+    _vid="$(cat "$_dir/idVendor" 2>/dev/null)"
+    _pid="$(cat "$_dir/idProduct" 2>/dev/null)"
+    if [[ "$_vid" == "0000" && "$_pid" == "0000" ]]; then
+        _ZERO_DEV="$_dir"
+        break
+    fi
+done
+
+if [[ -n "$_ZERO_DEV" ]]; then
+    echo "  Detected CP210x with corrupted USB IDs (0000:0000) at $(basename "$_ZERO_DEV")."
+    if [ -f "$_CP210X_NEW_ID" ]; then
+        echo "  Registering with cp210x driver..."
+        echo "0000 0000" | sudo tee "$_CP210X_NEW_ID" > /dev/null
+        sleep 1
+        echo "  Driver registered."
+    else
+        echo "  ⚠  $_CP210X_NEW_ID not found — cp210x kernel module may not be loaded."
+    fi
+
+    # Create/update the service so this survives reboots
+    sudo tee /etc/systemd/system/cp210x-meshtastic.service > /dev/null <<'SVC'
+[Unit]
+Description=Register CP210x 0000:0000 (Meshtastic) with cp210x driver
+After=systemd-udevd.service
+Before=nodebot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo "0000 0000" > /sys/bus/usb-serial/drivers/cp210x/new_id'
+
+[Install]
+WantedBy=multi-user.target
+SVC
+    sudo systemctl daemon-reload
+    sudo systemctl enable cp210x-meshtastic.service 2>/dev/null || true
+    echo "  cp210x-meshtastic.service installed and enabled."
+fi
+
 # ── Step 2: Detect Meshtastic device + udev symlink ──────────
 echo ""
 echo "[2/5] Detecting Meshtastic radio on USB ports..."
@@ -561,17 +608,6 @@ echo "  barometric pressure) via Meshtastic's telemetry protocol."
 echo "  Other Meshtastic nodes and apps (e.g. Meshtastic app) will see it."
 echo ""
 
-# Detect weewx
-WEEWX_DB=""
-WEEWX_FOUND=false
-for candidate in /var/lib/weewx/weewx.sdb /home/weewx/weewx.sdb /opt/weewx/weewx.sdb; do
-    if [ -f "$candidate" ]; then
-        WEEWX_DB="$candidate"
-        WEEWX_FOUND=true
-        break
-    fi
-done
-
 # Detect I2C sensors (informational)
 I2C_INFO=""
 if command -v i2cdetect >/dev/null 2>&1; then
@@ -610,11 +646,6 @@ echo "    ${TEL_OPT_NUM}) Static values — enter fixed temperature / humidity /
 TEL_OPT_NUM=$((TEL_OPT_NUM+1)); TEL_OPT_MAP[$TEL_OPT_NUM]="script"
 echo "    ${TEL_OPT_NUM}) External script — runs a script that prints JSON telemetry"
 
-if $WEEWX_FOUND; then
-    TEL_OPT_NUM=$((TEL_OPT_NUM+1)); TEL_OPT_MAP[$TEL_OPT_NUM]="weewx"
-    echo "    ${TEL_OPT_NUM}) weewx weather station (found: ${WEEWX_DB})"
-fi
-
 echo ""
 TEL_SEL=$(pick "Telemetry source" "$TEL_OPT_NUM")
 TEL_MODE="${TEL_OPT_MAP[$TEL_SEL]}"
@@ -623,7 +654,6 @@ TEL_STATIC_TEMP=""
 TEL_STATIC_HUM=""
 TEL_STATIC_PRES=""
 TEL_SCRIPT=""
-TEL_WEEWX_DB=""
 TEL_INTERVAL=10
 TEL_LABEL="disabled"
 
@@ -682,16 +712,6 @@ SAMPLE
         TEL_LABEL="script: $TEL_SCRIPT"
         ;;
 
-    weewx)
-        TEL_WEEWX_DB="$WEEWX_DB"
-        echo ""
-        printf "  weewx database [${WEEWX_DB}]: "
-        read -r WEEWX_IN || true
-        if [[ -n "$WEEWX_IN" ]]; then
-            TEL_WEEWX_DB="$WEEWX_IN"
-        fi
-        TEL_LABEL="weewx: $TEL_WEEWX_DB"
-        ;;
 esac
 
 # Telemetry interval (skip if disabled)
@@ -729,12 +749,19 @@ path, baud, region, preset, hops, power = sys.argv[1], sys.argv[2], sys.argv[3],
 with open(path) as f:
     content = f.read()
 
-content = re.sub(r'(?m)^#?\s*port\s*=.*$',          'port = /dev/meshtastic0',   content)
-content = re.sub(r'(?m)^#?\s*baudrate\s*=.*$',       f'baudrate = {baud}',        content)
-content = re.sub(r'(?m)^#?\s*region\s*=.*$',         f'region = {region}',        content)
-content = re.sub(r'(?m)^#?\s*modem_preset\s*=.*$',   f'modem_preset = {preset}',  content)
-content = re.sub(r'(?m)^#?\s*hop_limit\s*=.*$',      f'hop_limit = {hops}',       content)
-content = re.sub(r'(?m)^#?\s*tx_power\s*=.*$',       f'tx_power = {power}',       content)
+def replace_in_section(text, section, key, value):
+    """Replace key = ... only within the named section block."""
+    def replacer(m):
+        block = re.sub(r'(?m)^#?\s*' + re.escape(key) + r'\s*=.*$', key + ' = ' + value, m.group(1))
+        return block
+    return re.sub(r'(\[' + re.escape(section) + r'\].*?)(?=\n\[|\Z)', replacer, text, flags=re.DOTALL)
+
+content = replace_in_section(content, 'meshtastic', 'port',         '/dev/meshtastic0')
+content = replace_in_section(content, 'meshtastic', 'baudrate',     baud)
+content = replace_in_section(content, 'meshtastic', 'region',       region)
+content = replace_in_section(content, 'meshtastic', 'modem_preset', preset)
+content = replace_in_section(content, 'meshtastic', 'hop_limit',    hops)
+content = replace_in_section(content, 'meshtastic', 'tx_power',     power)
 
 with open(path, 'w') as f:
     f.write(content)
@@ -758,10 +785,10 @@ fi
 if grep -q "^\[telemetry\]" "$CONFIG_INI"; then
     echo "  [telemetry] section already present — updating."
     "$VENV_PYTHON" - "$CONFIG_INI" "$TEL_MODE" "$TEL_STATIC_TEMP" "$TEL_STATIC_HUM" \
-        "$TEL_STATIC_PRES" "$TEL_SCRIPT" "$TEL_WEEWX_DB" "$TEL_INTERVAL" <<'PYEOF'
+        "$TEL_STATIC_PRES" "$TEL_SCRIPT" "$TEL_INTERVAL" <<'PYEOF'
 import re, sys
 
-path, mode, temp, hum, pres, script, weewx_db, interval = sys.argv[1:9]
+path, mode, temp, hum, pres, script, interval = sys.argv[1:8]
 with open(path) as f:
     content = f.read()
 
@@ -770,7 +797,6 @@ content = re.sub(r'(?m)^#?\s*static_temp\s*=.*$',     f'static_temp = {temp}',  
 content = re.sub(r'(?m)^#?\s*static_humidity\s*=.*$', f'static_humidity = {hum}', content)
 content = re.sub(r'(?m)^#?\s*static_pressure\s*=.*$', f'static_pressure = {pres}', content)
 content = re.sub(r'(?m)^#?\s*script\s*=.*$',          f'script = {script}',      content)
-content = re.sub(r'(?m)^#?\s*weewx_db\s*=.*$',        f'weewx_db = {weewx_db}',  content)
 content = re.sub(r'(?m)^#?\s*interval_minutes\s*=.*$', f'interval_minutes = {interval}', content)
 
 with open(path, 'w') as f:
@@ -786,7 +812,6 @@ static_temp = $TEL_STATIC_TEMP
 static_humidity = $TEL_STATIC_HUM
 static_pressure = $TEL_STATIC_PRES
 script = $TEL_SCRIPT
-weewx_db = $TEL_WEEWX_DB
 interval_minutes = $TEL_INTERVAL
 CFG
     echo "  Appended [telemetry] section."
