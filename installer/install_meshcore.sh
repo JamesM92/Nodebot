@@ -465,6 +465,21 @@ printf "  Program these settings onto the radio now? (yes/no): "
 read -r DO_PROGRAM || true
 
 if [[ "${DO_PROGRAM,,}" == "yes" ]]; then
+    # Check if NodeBot is holding the port — programming will fail if so
+    if systemctl is-active --quiet nodebot 2>/dev/null; then
+        echo ""
+        echo "  NodeBot is currently running and holds the serial port."
+        printf "  Stop NodeBot now to free the port? (yes/no): "
+        read -r STOP_BOT || true
+        if [[ "${STOP_BOT,,}" == "yes" ]]; then
+            sudo systemctl stop nodebot
+            echo "  NodeBot stopped."
+        else
+            echo "  Skipping radio programming — port is busy."
+            echo "  Settings saved to config.ini and will be applied on next NodeBot start."
+            DO_PROGRAM="no"
+        fi
+    fi
     echo "  Programming radio..."
 
     SET_RADIO_SCRIPT=$(cat <<PYEOF
@@ -507,6 +522,12 @@ PYEOF
     else
         echo "  ⚠  Programming returned: $result"
         echo "     Settings may still have been applied — check device logs to confirm."
+    fi
+    # Restart NodeBot if we stopped it to free the port
+    if systemctl is-enabled --quiet nodebot 2>/dev/null && ! systemctl is-active --quiet nodebot 2>/dev/null; then
+        echo ""
+        echo "  Restarting NodeBot..."
+        sudo systemctl start nodebot
     fi
 else
     echo "  Skipping radio programming."
