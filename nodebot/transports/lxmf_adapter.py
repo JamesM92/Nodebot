@@ -6,7 +6,7 @@ import time
 import RNS
 import LXMF
 
-import logger
+from .. import logger
 
 
 class LXMFAdapter:

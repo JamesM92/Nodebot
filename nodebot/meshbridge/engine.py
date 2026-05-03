@@ -2,7 +2,7 @@
 
 import collections
 import time
-import commands
+from .. import commands
 
 
 class NodeBot:

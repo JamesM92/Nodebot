@@ -1,5 +1,5 @@
 import time
-from commands import register, admin_login, ACTIVE_ADMINS, BOT_INSTANCE, is_admin
+from ..commands import register, admin_login, ACTIVE_ADMINS, BOT_INSTANCE, is_admin
 
 
 @register(

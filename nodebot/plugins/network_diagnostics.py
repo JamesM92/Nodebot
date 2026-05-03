@@ -1,5 +1,5 @@
 import time
-from commands import register, BOT_INSTANCE
+from ..commands import register, BOT_INSTANCE
 
 
 @register(

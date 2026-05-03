@@ -564,8 +564,8 @@ Wants=network.target
 [Service]
 Type=simple
 User=$SERVICE_USER
-WorkingDirectory=$PROJECT_DIR/src
-ExecStart=$VENV_PYTHON $PROJECT_DIR/src/runbot.py
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$VENV_PYTHON $PROJECT_DIR/runbot.py
 Restart=always
 RestartSec=5
 StandardOutput=journal

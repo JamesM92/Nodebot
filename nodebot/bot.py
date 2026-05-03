@@ -5,10 +5,10 @@ import signal
 import sys
 import time
 
-from meshbridge.engine import NodeBot as MeshEngine
-from meshbridge.state import StateStore
-import commands as _commands
-import logger as _logger
+from .meshbridge.engine import NodeBot as MeshEngine
+from .meshbridge.state import StateStore
+from . import commands as _commands
+from . import logger as _logger
 
 
 class NodeBot:
@@ -64,7 +64,7 @@ class NodeBot:
             print("[nodebot] no transports directory found")
             return
 
-        sys.path.insert(0, transport_dir)
+        pass  # transports loaded as nodebot.transports package
 
         for file in os.listdir(transport_dir):
 
@@ -75,7 +75,7 @@ class NodeBot:
 
             try:
                 try:
-                    module = importlib.import_module(name)
+                    module = importlib.import_module(f'nodebot.transports.{name}')
                 except Exception as e:
                     print(f"[nodebot] transport {name} import failed: {e}")
                     continue
@@ -173,7 +173,7 @@ class NodeBot:
 
     def _housekeeping(self):
         import sys
-        relay_mod = sys.modules.get("plugins.relay")
+        relay_mod = sys.modules.get("nodebot.plugins.relay")
         if relay_mod:
             try:
                 relay_mod._expire_sessions()

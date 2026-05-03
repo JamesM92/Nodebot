@@ -1,5 +1,6 @@
 import time
-from commands import register, BOT_INSTANCE
+from ..commands import register, BOT_INSTANCE
+from .. import __version__
 
 
 # -------------------------
@@ -36,3 +37,18 @@ def uptime(args):
     minutes, seconds = divmod(remainder, 60)
 
     return f"Uptime: {hours}h {minutes}m {seconds}s"
+
+
+# -------------------------
+# Version
+# -------------------------
+
+@register(
+    "version",
+    "NodeBot software version",
+    category="tools",
+    cooldown=60
+)
+def version_cmd(args):
+
+    return f"NodeBot v{__version__}"

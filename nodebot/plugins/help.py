@@ -1,4 +1,4 @@
-from commands import register, COMMANDS
+from ..commands import register, COMMANDS
 
 PAGE_SIZE = 5
 

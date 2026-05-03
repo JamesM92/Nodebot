@@ -1,4 +1,4 @@
-from commands import register
+from ..commands import register
 
 
 @register(

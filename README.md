@@ -160,7 +160,7 @@ You will receive `Relay: delivered` or `Relay: delivery failed` as confirmation.
 
 ## Plugin System
 
-Plugins live in `src/plugins/`. NodeBot hot-reloads them automatically — drop a `.py` file in and it becomes active within `scan_interval` seconds, no restart needed.
+Plugins live in `nodebot/plugins/`. NodeBot hot-reloads them automatically — drop a `.py` file in and it becomes active within `scan_interval` seconds, no restart needed.
 
 A minimal plugin looks like:
 
@@ -231,13 +231,13 @@ journalctl -u nomadnet -f
 
 ```bash
 # Show the last 50 buffered messages then exit
-./chanlisten
+./scripts/chanlisten
 
 # Show last 50 messages and follow live (Ctrl-C to stop)
-./chanlisten -f
+./scripts/chanlisten -f
 
 # Show a specific number of buffered messages then follow
-./chanlisten -n 20 -f
+./scripts/chanlisten -n 20 -f
 ```
 
 Output format:
@@ -275,23 +275,35 @@ The Pi is undervoltaged. When multiple USB-serial radios draw current simultaneo
 
 ```
 NodeBot/
+├── runbot.py               # systemd entrypoint
 ├── config.example          # configuration template
 ├── config.ini              # active configuration (create from example)
+├── nodebot/                # main Python package
+│   ├── bot.py              # main coordinator
+│   ├── commands.py         # plugin loader and command dispatcher
+│   ├── logger.py           # shared logging
+│   ├── gps_reader.py       # GPS source helpers (gpsd, serial, scan)
+│   ├── meshbridge/         # core engine (routing, state, transport layer)
+│   ├── plugins/            # built-in plugins (relay, help, admin, tools, ...)
+│   └── transports/         # protocol adapters (LXMF, Meshtastic, MeshCore)
 ├── installer/
 │   ├── install_nodebot.sh  # base installer (Python env, systemd, GPS config)
 │   ├── install_lxmf.sh     # LXMF + NomadNet + rNode installer
 │   ├── install_meshcore.sh # MeshCore radio installer
 │   ├── install_meshtastic.sh # Meshtastic radio installer
+│   ├── reassign_usb.sh     # USB port reassignment utility
 │   ├── wait_for_rns.sh     # startup helper (waits for RNS socket)
 │   ├── nodebot.service     # systemd service template
 │   └── nomadnet.service    # systemd service template
-├── src/
-│   ├── runbot.py           # systemd entrypoint
-│   ├── nodebot.py          # main coordinator
-│   ├── commands.py         # plugin loader and command dispatcher
-│   ├── meshbridge/         # core engine (routing, state, transport layer)
-│   ├── plugins/            # built-in plugins (relay, help, admin, tools, ...)
-│   └── transports/         # protocol adapters (LXMF, Meshtastic, MeshCore)
+├── scripts/
+│   ├── chanlisten          # MeshCore channel monitor CLI
+│   └── announce.sh         # manual network announce helper
+├── docs/
+│   ├── lxmf-setup.md
+│   └── radio_settings/     # developer reference: frequencies, modem params, sync words
+│       ├── reticulum_rnode.md
+│       ├── meshcore.md
+│       └── meshtastic.md
 ├── requirements.txt
 └── pyproject.toml
 ```

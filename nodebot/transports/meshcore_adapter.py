@@ -6,7 +6,7 @@ import re
 import threading
 import time
 
-import logger
+from .. import logger
 
 
 CHAN_SOCK_PATH = "/tmp/nodebot_chan.sock"
@@ -371,17 +371,17 @@ class MeshCoreAdapter:
                 last_forced = now
 
     def _scan_for_gps(self):
-        from gps_reader import scan_for_gps
+        from ..gps_reader import scan_for_gps
         return scan_for_gps(exclude_port=self.port)
 
     @staticmethod
     def _read_gpsd(timeout=30):
-        from gps_reader import read_gpsd
+        from ..gps_reader import read_gpsd
         return read_gpsd(timeout=timeout)
 
     @staticmethod
     def _read_serial_gps(device, timeout=30):
-        from gps_reader import read_serial_gps
+        from ..gps_reader import read_serial_gps
         return read_serial_gps(device, timeout=timeout)
 
     # =====================================================

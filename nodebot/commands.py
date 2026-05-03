@@ -188,7 +188,7 @@ def scan_plugins(force=False):
         return
 
     present = {
-        f"plugins.{f[:-3]}"
+        f"nodebot.plugins.{f[:-3]}"
         for f in files
         if f.endswith(".py") and not f.startswith("__")
     }
@@ -212,7 +212,7 @@ def scan_plugins(force=False):
         if file.startswith("__"):
             continue
 
-        module_name = f"plugins.{file[:-3]}"
+        module_name = f"nodebot.plugins.{file[:-3]}"
         path = os.path.join(PLUGIN_DIR, file)
 
         try:

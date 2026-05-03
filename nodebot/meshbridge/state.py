@@ -1,4 +1,4 @@
-# /src/meshbridge/state.py
+# meshbridge/state.py
 
 import time
 import threading
