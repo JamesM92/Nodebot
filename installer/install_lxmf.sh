@@ -792,6 +792,15 @@ sed -i "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$NODE_PAGE"
 chmod +x "$NODE_PAGE"
 echo "      Written: $NODE_PAGE"
 
+# Deploy the discovery/advertisement page from the project template
+AD_PAGE="$PAGES_DIR/nodebot/nodebot_ad.mu"
+AD_TEMPLATE="$PROJECT_DIR/installer/pages/nodebot_ad.mu"
+if [ -f "$AD_TEMPLATE" ]; then
+    sed "s|PROJECT_DIR_PLACEHOLDER|$PROJECT_DIR|g" "$AD_TEMPLATE" > "$AD_PAGE"
+    chmod +x "$AD_PAGE"
+    echo "      Written: $AD_PAGE"
+fi
+
 # Write index.mu only if one doesn't already exist.
 # NomadNet has no redirect mechanism; index.mu is an executable Python script
 # that runs the target page as a subprocess and pipes stdout through, so
