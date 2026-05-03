@@ -69,41 +69,38 @@ fi
 echo ""
 
 # ── Region / frequency data ───────────────────────────────────
-# Format: "frequency_hz|bandwidth_hz|spreading_factor|description"
-# Source: https://github.com/markqvist/Reticulum/wiki/Popular-RNode-Settings
+# Loaded from docs/radio_settings/presets.toml via Python (tomllib, stdlib ≥3.11).
+# Python writes bash-sourceable REGION_NAMES and SETTINGS_N arrays to a tempfile.
+# Downstream code (region menu, sub-preset menu) is unchanged.
+_PRESETS_TMP="$(mktemp)"
+"$VENV_PYTHON" - "$PROJECT_DIR/docs/radio_settings/presets.toml" "$_PRESETS_TMP" <<'PYEOF'
+import sys, tomllib
 
-REGION_NAMES=(
-    "Australia"
-    "Belgium"
-    "China"
-    "Finland"
-    "Germany"
-    "Italy"
-    "Malaysia / Singapore / Thailand (AS923)"
-    "Netherlands"
-    "Norway"
-    "Spain"
-    "Sweden"
-    "Switzerland"
-    "United Kingdom"
-    "United States"
-    "Manual entry (custom values)"
-)
+toml_path, out_path = sys.argv[1], sys.argv[2]
+with open(toml_path, "rb") as fh:
+    data = tomllib.load(fh)
 
-SETTINGS_1=("925875000|250000|9|Western Sydney (sydney.reticulum.au)" "925875000|250000|11|Sydney (VK2DIO T-Beam)" "925875000|250000|9|Brisbane")
-SETTINGS_2=("867200000|125000|8|Duffel (SiSCD-Node)")
-SETTINGS_3=("470300000|125000|9|Beijing (BJ-RNS-Node)" "471500000|125000|10|Shanghai (SH-LoRa-Gateway)" "472700000|250000|8|Guangzhou (GZ-Reticulum-Hub)" "473900000|125000|11|Chengdu (CD-LoRa-Node)")
-SETTINGS_4=("869420000|125000|8|Turku (TurkuFI)")
-SETTINGS_5=("869400000|250000|7|Darmstadt (CCC Darmstadt)" "869525000|125000|8|Wiesbaden (data.haus Germany)")
-SETTINGS_6=("869525000|250000|8|Salerno (F LoRa Node)" "867200000|125000|7|Brescia (N0SIGNAL)" "867200000|125000|7|Treviso (Arg0net RRP)" "433600000|125000|12|Genova (XZ Group LoRa)")
-SETTINGS_7=("920500000|125000|8|AS923 LoRaWAN Regional Parameters")
-SETTINGS_8=("867200000|125000|8|Rotterdam Nesselande (Undique)" "869400000|125000|8|Brugge (RNS Brugge Gateway)")
-SETTINGS_9=("869431250|62500|7|Norway")
-SETTINGS_10=("868200000|125000|8|Madrid (Quixote Radio Shack)")
-SETTINGS_11=("869525000|250000|10|Gothenburg / Borås / Älvsered (868 MHz)" "433575000|125000|8|Gothenburg / Borås / Älvsered (433 MHz)" "866000000|125000|8|Mörbylånga/Bredinge")
-SETTINGS_12=("868000000|250000|8|Bern (Swisslibertarians)")
-SETTINGS_13=("867500000|125000|9|Various / St. Helens / Edinburgh (868 MHz)" "2427000000|812500|7|Edinburgh (VonChaos 2.4 GHz)")
-SETTINGS_14=("914875000|125000|8|Portsmouth NH / Olympia WA / Chicago IL")
+presets = data["lxmf"]["presets"]
+region_names = [p["region"] for p in presets] + ["Manual entry (custom values)"]
+
+lines = []
+quoted_names = " ".join(f'"{n}"' for n in region_names)
+lines.append(f"REGION_NAMES=({quoted_names})")
+
+for idx, preset in enumerate(presets, start=1):
+    entries = preset["nodes"]
+    quoted_entries = " ".join(
+        f'"{e["freq_hz"]}|{e["bw_hz"]}|{e["sf"]}|{e["description"]}"'
+        for e in entries
+    )
+    lines.append(f"SETTINGS_{idx}=({quoted_entries})")
+
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+PYEOF
+# shellcheck source=/dev/null
+source "$_PRESETS_TMP"
+rm -f "$_PRESETS_TMP"
 
 # ── Helper: pick from a numbered list ────────────────────────
 pick() {
@@ -179,7 +176,7 @@ if $USE_RNODE; then
         printf "  Probing %-16s [%s %s S/N:%s] ... " \
             "$port" "$vendor" "$model" "${serial:-none}"
         rnode_info=$(timeout 6 "$RNODECONF_BIN" "$port" --info 2>/dev/null)
-        if echo "$rnode_info" | grep -qiE "firmware|product|rnode"; then
+        if echo "$rnode_info" | grep -qi "firmware"; then
             fw_ver=$(echo "$rnode_info" | grep -i "Firmware version" | awk '{print $NF}')
             echo "rNode detected (firmware ${fw_ver:-unknown})"
             RNODE_PORTS+=("$port")
@@ -256,14 +253,14 @@ UDEV_HEADER
                 echo "    ⚠  Serial S/N '$id_serial_short' is a generic factory default."
                 echo "       Using physical USB port path instead."
                 echo "       This device must stay in the same USB port to be recognised."
-                RULE="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", SYMLINK+=\"${symlink}\""
+                RULE="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
             else
                 echo "    Unique serial detected — symlink will follow device across ports."
-                RULE="SUBSYSTEM==\"tty\", ENV{ID_SERIAL}==\"${id_serial}\", SYMLINK+=\"${symlink}\""
+                RULE="SUBSYSTEM==\"tty\", ENV{ID_SERIAL}==\"${id_serial}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
             fi
         else
             echo "    No USB serial info found, using physical port path."
-            RULE="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", SYMLINK+=\"${symlink}\""
+            RULE="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
         fi
 
         echo "    Rule: $RULE"
@@ -940,9 +937,9 @@ Requires=nomadnet.service
 [Service]
 Type=simple
 User=$SERVICE_USER
-WorkingDirectory=$PROJECT_DIR/src
+WorkingDirectory=$PROJECT_DIR
 ExecStartPre=/bin/bash $WAIT_SCRIPT 30
-ExecStart=$VENV_PYTHON $PROJECT_DIR/src/runbot.py
+ExecStart=$VENV_PYTHON $PROJECT_DIR/runbot.py
 Restart=always
 RestartSec=5
 StandardOutput=journal

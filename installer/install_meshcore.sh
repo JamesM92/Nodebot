@@ -24,10 +24,40 @@ CONFIG_INI="$PROJECT_DIR/config.ini"
 UDEV_RULES="/etc/udev/rules.d/99-meshcore.rules"
 DEFAULT_BAUD=115200
 
-# Fixed RF parameters — same for all MeshCore regions
-MC_SF=10
-MC_CR=5
-MC_BW=250.0   # kHz
+# ── Region / modulation preset data ──────────────────────────
+# Loaded from docs/radio_settings/presets.toml via Python (tomllib, stdlib ≥3.11).
+# Produces parallel arrays: MC_PRESET_COUNT, MC_PRESET_REGIONS, MC_PRESET_FREQS,
+#   MC_PRESET_BWS, MC_PRESET_SFS, MC_PRESET_CRS
+_PRESETS_TMP="$(mktemp)"
+"$VENV_PYTHON" - "$PROJECT_DIR/docs/radio_settings/presets.toml" "$_PRESETS_TMP" <<'PYEOF'
+import sys, tomllib
+
+toml_path, out_path = sys.argv[1], sys.argv[2]
+with open(toml_path, "rb") as fh:
+    data = tomllib.load(fh)
+
+presets = data["meshcore"]["presets"]
+
+regions = " ".join(f'"{p["region"]}"' for p in presets)
+freqs   = " ".join(str(p["freq_mhz"]) for p in presets)
+bws     = " ".join(str(p["bw_khz"])   for p in presets)
+sfs     = " ".join(str(p["sf"])       for p in presets)
+crs     = " ".join(str(p["cr"])       for p in presets)
+
+lines = [
+    f"MC_PRESET_COUNT={len(presets)}",
+    f"MC_PRESET_REGIONS=({regions})",
+    f"MC_PRESET_FREQS=({freqs})",
+    f"MC_PRESET_BWS=({bws})",
+    f"MC_PRESET_SFS=({sfs})",
+    f"MC_PRESET_CRS=({crs})",
+]
+with open(out_path, "w") as fh:
+    fh.write("\n".join(lines) + "\n")
+PYEOF
+# shellcheck source=/dev/null
+source "$_PRESETS_TMP"
+rm -f "$_PRESETS_TMP"
 
 echo ""
 echo "================================================"
@@ -398,34 +428,40 @@ echo ""
 # ── Step 4: Region / frequency selection and radio programming ─
 echo "[4/5] Radio frequency configuration"
 echo ""
-echo "  All MeshCore regions share the same modulation settings:"
-printf "  SF=%-3s  CR=%-3s  BW=%.0f kHz\n" "$MC_SF" "$MC_CR" "$MC_BW"
-echo ""
-echo "  Only the frequency differs by region."
-echo "  (Source: MeshCore FAQ — https://github.com/meshcore-dev/MeshCore/wiki/FAQ)"
-echo ""
 echo "  Select your region:"
-echo "    1) Australia / New Zealand  — 915.800 MHz"
-echo "    2) USA                      — 910.525 MHz"
-echo "    3) UK / EU                  — 867.500 MHz"
-echo "    4) UK / EU (proposed)       — 869.525 MHz (community discussion, not finalised)"
-echo "    5) Manual entry             — enter custom frequency"
+for (( _i=0; _i<MC_PRESET_COUNT; _i++ )); do
+    printf "    %d) %-36s  %s MHz  BW=%s kHz  SF=%s  CR=4/%s\n" \
+        $((_i+1)) \
+        "${MC_PRESET_REGIONS[$_i]}" \
+        "${MC_PRESET_FREQS[$_i]}" \
+        "${MC_PRESET_BWS[$_i]}" \
+        "${MC_PRESET_SFS[$_i]}" \
+        "${MC_PRESET_CRS[$_i]}"
+done
+printf "    %d) Manual entry\n" $(( MC_PRESET_COUNT + 1 ))
 echo ""
 
-REGION=$(pick "Region" 5)
+REGION=$(pick "Region" $(( MC_PRESET_COUNT + 1 )))
 REGION_LABEL=""
 
-case "$REGION" in
-    1) MC_FREQ=915.8;   REGION_LABEL="Australia / New Zealand" ;;
-    2) MC_FREQ=910.525; REGION_LABEL="USA" ;;
-    3) MC_FREQ=867.5;   REGION_LABEL="UK / EU" ;;
-    4) MC_FREQ=869.525; REGION_LABEL="UK / EU (proposed 869.525 MHz)" ;;
-    5)
-        printf "  Frequency in MHz (e.g. 915.8): "
-        read -r MC_FREQ || true
-        REGION_LABEL="Custom"
-        ;;
-esac
+if (( REGION <= MC_PRESET_COUNT )); then
+    _idx=$(( REGION - 1 ))
+    REGION_LABEL="${MC_PRESET_REGIONS[$_idx]}"
+    MC_FREQ="${MC_PRESET_FREQS[$_idx]}"
+    MC_BW="${MC_PRESET_BWS[$_idx]}"
+    MC_SF="${MC_PRESET_SFS[$_idx]}"
+    MC_CR="${MC_PRESET_CRS[$_idx]}"
+else
+    printf "  Frequency in MHz (e.g. 910.525): "
+    read -r MC_FREQ || true
+    printf "  Bandwidth in kHz (e.g. 62.5):    "
+    read -r MC_BW   || true
+    printf "  Spreading factor (e.g. 7):       "
+    read -r MC_SF   || true
+    printf "  Coding rate denominator (e.g. 5): "
+    read -r MC_CR   || true
+    REGION_LABEL="Custom"
+fi
 
 echo ""
 echo "  ── Forwarding / repeater configuration ─────────────"

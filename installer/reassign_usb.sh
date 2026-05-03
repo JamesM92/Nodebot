@@ -106,16 +106,28 @@ if (( ${#PORTS[@]} == 0 )); then
     exit 1
 fi
 
-# ── Stop NodeBot before probing so it doesn't hold ports ─────
+# ── Stop NodeBot and NomadNet before probing so ports are free ─
 _NODEBOT_WAS_RUNNING=false
-if systemctl is-active --quiet nodebot 2>/dev/null; then
-    echo "  NodeBot is running and may hold serial ports, causing probe failures."
-    printf "  Stop NodeBot during probing? (recommended) (yes/no): "
+_NOMADNET_WAS_RUNNING=false
+
+if systemctl is-active --quiet nodebot 2>/dev/null || systemctl is-active --quiet nomadnet 2>/dev/null; then
+    echo "  Running services may hold serial ports, causing probe failures."
+    systemctl is-active --quiet nodebot   2>/dev/null && echo "    nodebot   — running (holds MeshCore / Meshtastic ports)"
+    systemctl is-active --quiet nomadnet  2>/dev/null && echo "    nomadnet  — running (holds rNode port)"
+    echo ""
+    printf "  Stop these services during probing? (recommended) (yes/no): "
     read -r _STOP_FOR_PROBE || true
     if [[ "${_STOP_FOR_PROBE,,}" == "yes" ]]; then
-        sudo systemctl stop nodebot
-        _NODEBOT_WAS_RUNNING=true
-        echo "  NodeBot stopped."
+        if systemctl is-active --quiet nodebot 2>/dev/null; then
+            sudo systemctl stop nodebot
+            _NODEBOT_WAS_RUNNING=true
+            echo "  NodeBot stopped."
+        fi
+        if systemctl is-active --quiet nomadnet 2>/dev/null; then
+            sudo systemctl stop nomadnet
+            _NOMADNET_WAS_RUNNING=true
+            echo "  NomadNet stopped."
+        fi
     fi
     echo ""
 fi
@@ -161,28 +173,68 @@ MESHTASTIC_PROBE_PY=$(cat <<'PYEOF'
 import sys
 try:
     import meshtastic.serial_interface as mi
-    iface = mi.SerialInterface(devPath=sys.argv[1], noProto=False)
+    iface = mi.SerialInterface(devPath=sys.argv[1])
     node = iface.myInfo
     name = getattr(node, "long_name", "") or ""
     iface.close()
     print(f"OK:{name}")
 except Exception as e:
-    print(f"FAIL:{e}")
+    # A timeout means the port opened but the device didn't complete the
+    # protocol handshake — it is present but in an unresponsive state
+    # (e.g. needs a replug after repeated probing). Treat as WARN, not FAIL.
+    if "timed out" in str(e).lower():
+        print("WARN:device present but unresponsive — try replugging")
+    else:
+        print(f"FAIL:{e}")
 PYEOF
 )
 
 # Arrays: PROBE_RESULT[port_index][protocol] -> "OK:detail" / "FAIL:reason" / "SKIP"
 declare -A PROBE_RESULT  # key = "idx:proto"
 
+# Build a map of real device path -> currently assigned protocol so each port
+# is probed for its known protocol first.  A quick OK skips all other probes.
+declare -A PORT_CURRENT_PROTO
+for _p in "${INSTALLED[@]}"; do
+    _sym="/dev/${PROTO_SYMLINK[$_p]}"
+    [[ -L "$_sym" ]] || continue
+    _real=$(readlink -f "$_sym" 2>/dev/null || true)
+    [[ -n "$_real" ]] && PORT_CURRENT_PROTO["$_real"]="$_p"
+done
+
 for i in "${!PORTS[@]}"; do
     port="${PORTS[$i]}"
     label="${PORT_LABELS[$i]}"
     printf "  [%d] %-16s  %s\n" $((i+1)) "$port" "$label"
 
-    for proto in "${INSTALLED[@]}"; do
+    # Probe order: currently-assigned protocol first, then others.
+    # This avoids sending foreign-protocol handshakes to devices that are
+    # already confirmed, and reduces stress on sensitive devices (e.g. T-Beam).
+    _cur="${PORT_CURRENT_PROTO[$port]:-}"
+    _probe_order=()
+    [[ -n "$_cur" ]] && _probe_order+=("$_cur")
+    for _p in "${INSTALLED[@]}"; do
+        [[ "$_p" == "$_cur" ]] && continue
+        _probe_order+=("$_p")
+    done
+
+    for proto in "${_probe_order[@]}"; do
         printf "       %-12s  checking ... " "${PROTO_LABEL[$proto]}"
 
+        # Cross-protocol skip: if this port already got OK for a different
+        # protocol, there is no point running a slow probe here — it cannot
+        # be two things at once, and the foreign-protocol handshake can leave
+        # sensitive devices (e.g. ESP32-based Meshtastic nodes) in a bad state.
+        _skip_cross=false
+        for _other in "${INSTALLED[@]}"; do
+            [[ "$_other" == "$proto" ]] && continue
+            [[ "${PROBE_RESULT["$i:$_other"]:-SKIP}" == OK:* ]] && _skip_cross=true && break
+        done
+
         result="SKIP"
+        if $_skip_cross; then
+            result="SKIP:port confirmed as another protocol"
+        else
         case "$proto" in
         meshcore)
             if [[ -f "$VENV_PYTHON" ]]; then
@@ -197,7 +249,7 @@ for i in "${!PORTS[@]}"; do
                 RNODECONF="${USER_BIN}/rnodeconf"
                 command -v rnodeconf &>/dev/null && RNODECONF="rnodeconf"
                 rn_out=$(timeout 6 "$RNODECONF" --info "$port" 2>&1 || true)
-                if echo "$rn_out" | grep -qi "rnode\|firmware\|device" && \
+                if echo "$rn_out" | grep -qi "firmware" && \
                    ! echo "$rn_out" | grep -qi "did not respond\|not respond\|no device\|permission denied"; then
                     fw=$(echo "$rn_out" | grep -i "firmware" | head -1 | sed 's/.*: *//' || true)
                     result="OK:${fw:-rNode detected}"
@@ -217,12 +269,27 @@ for i in "${!PORTS[@]}"; do
             ;;
         meshtastic)
             if [[ -f "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import meshtastic" &>/dev/null 2>&1; then
-                result=$(timeout 8 "$VENV_PYTHON" -c "$MESHTASTIC_PROBE_PY" "$port" 2>/dev/null || echo "FAIL:probe error")
+                result=$(timeout 35 "$VENV_PYTHON" -c "$MESHTASTIC_PROBE_PY" "$port" 2>/dev/null || echo "FAIL:probe error")
+                # If the probe timed out, toggle DTR to reset the device's serial
+                # state (ESP32-based boards reset on DTR toggle). This prevents
+                # the device accumulating bad state across repeated probe runs.
+                if [[ "$result" == WARN:* || "$result" == "FAIL:probe error" ]]; then
+                    "$VENV_PYTHON" - "$port" <<'PYEOF' 2>/dev/null || true
+import sys, time, serial
+try:
+    s = serial.Serial(sys.argv[1], 115200, timeout=0.2)
+    s.dtr = False; time.sleep(0.1); s.dtr = True
+    s.close()
+except Exception:
+    pass
+PYEOF
+                fi
             else
                 result="WARN:meshtastic library not available — cannot confirm"
             fi
             ;;
         esac
+        fi  # end cross-protocol skip
 
         PROBE_RESULT["$i:$proto"]="$result"
 
@@ -260,7 +327,24 @@ for proto in "${INSTALLED[@]}"; do
             best_idx=$i
         fi
     done
-    [[ -n "$best_idx" ]] && SUGGESTED_IDX["$proto"]=$best_idx
+    # Only promote a WARN suggestion if there is no current assignment to fall
+    # back to — avoids suggesting the wrong device when every port looks the
+    # same (e.g. all three CP210x devices WARN for Meshtastic).
+    if [[ -n "$best_idx" && "$best_rank" -eq 0 ]]; then
+        SUGGESTED_IDX["$proto"]=$best_idx
+    elif [[ -n "$best_idx" && "$best_rank" -eq 1 ]]; then
+        # Check if the current symlink resolves to one of the discovered ports
+        sym="/dev/${PROTO_SYMLINK[$proto]}"
+        current_port=""
+        [[ -L "$sym" ]] && current_port=$(readlink -f "$sym" 2>/dev/null || true)
+        has_current=false
+        for i in "${!PORTS[@]}"; do
+            real=$(readlink -f "${PORTS[$i]}" 2>/dev/null || echo "${PORTS[$i]}")
+            [[ "$real" == "$current_port" ]] && has_current=true && break
+        done
+        # Only use the WARN suggestion if there is no existing assignment to fall back to
+        $has_current || SUGGESTED_IDX["$proto"]=$best_idx
+    fi
 done
 
 # ── Step 6: User assignment ───────────────────────────────────
@@ -422,14 +506,14 @@ make_rule() {
     local rule="" bind_rule=""
 
     if [[ -n "$id_serial" ]] && ! $is_generic; then
-        rule="SUBSYSTEM==\"tty\", ENV{ID_SERIAL}==\"${id_serial}\", SYMLINK+=\"${symlink}\""
+        rule="SUBSYSTEM==\"tty\", ENV{ID_SERIAL}==\"${id_serial}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
     elif [[ "$id_vendor" == "10c4" && "$id_model_id" != "ea60" && -n "$id_model_id" ]]; then
         bind_rule="ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"${id_model_id}\", RUN+=\"/bin/sh -c 'echo 10c4 ${id_model_id} > /sys/bus/usb-serial/drivers/cp210x/new_id'\""
-        rule="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"${id_model_id}\", SYMLINK+=\"${symlink}\""
+        rule="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"${id_model_id}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
     elif [[ "$id_vendor" == "1a86" ]]; then
-        rule="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"${id_model_id}\", SYMLINK+=\"${symlink}\""
+        rule="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"${id_model_id}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
     else
-        rule="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", SYMLINK+=\"${symlink}\""
+        rule="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
     fi
 
     echo "# NodeBot USB device rule — updated by reassign_usb.sh on $(date '+%Y-%m-%d %H:%M')"
@@ -447,6 +531,15 @@ if systemctl is-active --quiet nodebot 2>/dev/null; then
 elif $_NODEBOT_WAS_RUNNING; then
     # Already stopped for probing — still need to restart after
     stop_service=true
+fi
+
+stop_nomadnet=false
+if systemctl is-active --quiet nomadnet 2>/dev/null; then
+    echo "  Stopping nomadnet service..."
+    sudo systemctl stop nomadnet
+    stop_nomadnet=true
+elif $_NOMADNET_WAS_RUNNING; then
+    stop_nomadnet=true
 fi
 
 for proto in "${INSTALLED[@]}"; do
@@ -486,6 +579,12 @@ if $stop_service; then
     echo ""
     echo "  Restarting nodebot service..."
     sudo systemctl start nodebot
+fi
+
+if $stop_nomadnet; then
+    echo ""
+    echo "  Restarting nomadnet service..."
+    sudo systemctl start nomadnet
 fi
 
 echo ""

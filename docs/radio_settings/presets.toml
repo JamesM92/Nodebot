@@ -1,0 +1,433 @@
+# docs/radio_settings/presets.toml
+# Machine-readable radio presets for NodeBot installers.
+#
+# lxmf.presets  — loaded by install_lxmf.sh
+#   Units: freq_hz (integer Hz), bw_hz (integer Hz), sf (integer)
+#   Source: https://github.com/markqvist/Reticulum/wiki/Popular-RNode-Settings
+#
+# meshcore.presets — loaded by install_meshcore.sh
+#   Units: freq_mhz (float MHz), bw_khz (float kHz), sf (integer), cr (integer)
+#   Source: MeshCore community defaults — docs/radio_settings/meshcore.md
+#
+# Human-readable reference: docs/radio_settings/{reticulum_rnode,meshcore,meshtastic}.md
+# =============================================================================
+
+
+# ── LXMF / rNode ─────────────────────────────────────────────────────────────
+
+[[lxmf.presets]]
+region = "Australia"
+nodes = [
+  { freq_hz = 925875000, bw_hz = 250000, sf = 9,  description = "Western Sydney (sydney.reticulum.au)" },
+  { freq_hz = 925875000, bw_hz = 250000, sf = 11, description = "Sydney (VK2DIO T-Beam)" },
+  { freq_hz = 925875000, bw_hz = 250000, sf = 9,  description = "Brisbane" },
+]
+
+[[lxmf.presets]]
+region = "Belgium"
+nodes = [
+  { freq_hz = 867200000, bw_hz = 125000, sf = 8, description = "Duffel (SiSCD-Node)" },
+]
+
+[[lxmf.presets]]
+region = "China"
+nodes = [
+  { freq_hz = 470300000, bw_hz = 125000, sf = 9,  description = "Beijing (BJ-RNS-Node)" },
+  { freq_hz = 471500000, bw_hz = 125000, sf = 10, description = "Shanghai (SH-LoRa-Gateway)" },
+  { freq_hz = 472700000, bw_hz = 250000, sf = 8,  description = "Guangzhou (GZ-Reticulum-Hub)" },
+  { freq_hz = 473900000, bw_hz = 125000, sf = 11, description = "Chengdu (CD-LoRa-Node)" },
+]
+
+[[lxmf.presets]]
+region = "Finland"
+nodes = [
+  { freq_hz = 869420000, bw_hz = 125000, sf = 8, description = "Turku (TurkuFI)" },
+]
+
+[[lxmf.presets]]
+region = "Germany"
+nodes = [
+  { freq_hz = 869400000, bw_hz = 250000, sf = 7, description = "Darmstadt (CCC Darmstadt)" },
+  { freq_hz = 869525000, bw_hz = 125000, sf = 8, description = "Wiesbaden (data.haus Germany)" },
+]
+
+[[lxmf.presets]]
+region = "Italy"
+nodes = [
+  { freq_hz = 869525000, bw_hz = 250000, sf = 8,  description = "Salerno (F LoRa Node)" },
+  { freq_hz = 867200000, bw_hz = 125000, sf = 7,  description = "Brescia (N0SIGNAL)" },
+  { freq_hz = 867200000, bw_hz = 125000, sf = 7,  description = "Treviso (Arg0net RRP)" },
+  { freq_hz = 433600000, bw_hz = 125000, sf = 12, description = "Genova (XZ Group LoRa)" },
+]
+
+[[lxmf.presets]]
+region = "Malaysia / Singapore / Thailand (AS923)"
+nodes = [
+  { freq_hz = 920500000, bw_hz = 125000, sf = 8, description = "AS923 LoRaWAN Regional Parameters" },
+]
+
+[[lxmf.presets]]
+region = "Netherlands"
+nodes = [
+  { freq_hz = 867200000, bw_hz = 125000, sf = 8, description = "Rotterdam Nesselande (Undique)" },
+  { freq_hz = 869400000, bw_hz = 125000, sf = 8, description = "Brugge (RNS Brugge Gateway)" },
+]
+
+[[lxmf.presets]]
+region = "Norway"
+nodes = [
+  { freq_hz = 869431250, bw_hz = 62500, sf = 7, description = "Norway" },
+]
+
+[[lxmf.presets]]
+region = "Spain"
+nodes = [
+  { freq_hz = 868200000, bw_hz = 125000, sf = 8, description = "Madrid (Quixote Radio Shack)" },
+]
+
+[[lxmf.presets]]
+region = "Sweden"
+nodes = [
+  { freq_hz = 869525000, bw_hz = 250000, sf = 10, description = "Gothenburg / Borås / Älvsered (868 MHz)" },
+  { freq_hz = 433575000, bw_hz = 125000, sf = 8,  description = "Gothenburg / Borås / Älvsered (433 MHz)" },
+  { freq_hz = 866000000, bw_hz = 125000, sf = 8,  description = "Mörbylånga/Bredinge" },
+]
+
+[[lxmf.presets]]
+region = "Switzerland"
+nodes = [
+  { freq_hz = 868000000, bw_hz = 250000, sf = 8, description = "Bern (Swisslibertarians)" },
+]
+
+[[lxmf.presets]]
+region = "United Kingdom"
+nodes = [
+  { freq_hz = 867500000,  bw_hz = 125000, sf = 9, description = "Various / St. Helens / Edinburgh (868 MHz)" },
+  { freq_hz = 2427000000, bw_hz = 812500, sf = 7, description = "Edinburgh (VonChaos 2.4 GHz)" },
+]
+
+[[lxmf.presets]]
+region = "United States"
+nodes = [
+  { freq_hz = 914875000, bw_hz = 125000, sf = 8, description = "Portsmouth NH / Olympia WA / Chicago IL" },
+]
+
+# NOTE: "Manual entry (custom values)" is appended by the installer at runtime,
+# not stored here.
+
+
+# ── MeshCore ──────────────────────────────────────────────────────────────────
+
+[[meshcore.presets]]
+region   = "Australia / New Zealand"
+freq_mhz = 915.525
+bw_khz   = 62.5
+sf       = 7
+cr       = 5
+
+[[meshcore.presets]]
+region   = "United States"
+freq_mhz = 910.525
+bw_khz   = 62.5
+sf       = 7
+cr       = 5
+
+[[meshcore.presets]]
+region   = "Europe (868 MHz)"
+freq_mhz = 869.525
+bw_khz   = 62.5
+sf       = 7
+cr       = 5
+
+[[meshcore.presets]]
+region   = "Europe (433 MHz)"
+freq_mhz = 433.525
+bw_khz   = 62.5
+sf       = 7
+cr       = 5
+
+[[meshcore.presets]]
+region   = "Japan"
+freq_mhz = 921.525
+bw_khz   = 62.5
+sf       = 7
+cr       = 5
+
+
+# ── Meshtastic ────────────────────────────────────────────────────────────────
+# NOTE: install_meshtastic.sh does NOT load from this section.
+# Meshtastic uses firmware-managed regions and presets — the installer passes
+# region/preset code strings to the Meshtastic API; the firmware computes all
+# radio parameters internally.
+#
+# This section is provided as a cross-protocol reference only.
+# Full channel frequency formula and per-region slot tables: meshtastic.md
+
+# Modem presets — fixed parameters, apply in all regions
+# Source: https://github.com/meshtastic/firmware/blob/master/src/mesh/RadioInterface.cpp
+[[meshtastic.presets]]
+code        = "SHORT_TURBO"
+sf          = 7
+bw_khz      = 500
+cr          = "4/5"
+symbol_time_ms = 0.26
+data_rate_kbps = 21.88
+notes       = "Not legal in all regions (500 kHz BW)"
+
+[[meshtastic.presets]]
+code        = "SHORT_FAST"
+sf          = 7
+bw_khz      = 250
+cr          = "4/5"
+symbol_time_ms = 0.51
+data_rate_kbps = 10.94
+
+[[meshtastic.presets]]
+code        = "SHORT_SLOW"
+sf          = 8
+bw_khz      = 250
+cr          = "4/5"
+symbol_time_ms = 1.02
+data_rate_kbps = 6.25
+
+[[meshtastic.presets]]
+code        = "MEDIUM_FAST"
+sf          = 9
+bw_khz      = 250
+cr          = "4/5"
+symbol_time_ms = 2.05
+data_rate_kbps = 3.52
+
+[[meshtastic.presets]]
+code        = "MEDIUM_SLOW"
+sf          = 10
+bw_khz      = 250
+cr          = "4/5"
+symbol_time_ms = 4.10
+data_rate_kbps = 1.95
+
+[[meshtastic.presets]]
+code        = "LONG_TURBO"
+sf          = 11
+bw_khz      = 500
+cr          = "4/8"
+symbol_time_ms = 4.10
+data_rate_kbps = 1.34
+
+[[meshtastic.presets]]
+code        = "LONG_FAST"
+sf          = 11
+bw_khz      = 250
+cr          = "4/5"
+symbol_time_ms = 8.19
+data_rate_kbps = 1.07
+default     = true
+notes       = "Firmware default — good balance of speed and range"
+
+[[meshtastic.presets]]
+code        = "LONG_MODERATE"
+sf          = 11
+bw_khz      = 125
+cr          = "4/8"
+symbol_time_ms = 16.38
+data_rate_kbps = 0.34
+
+[[meshtastic.presets]]
+code        = "LONG_SLOW"
+sf          = 12
+bw_khz      = 125
+cr          = "4/8"
+symbol_time_ms = 32.77
+data_rate_kbps = 0.18
+
+[[meshtastic.presets]]
+code        = "VERY_LONG_SLOW"
+sf          = 12
+bw_khz      = 62.5
+cr          = "4/8"
+symbol_time_ms = 65.54
+data_rate_kbps = 0.09
+notes       = "Max range, very slow — not recommended for general use"
+
+# Regions — frequency band, regulatory limits
+# Full slot/channel calculations: meshtastic.md
+[[meshtastic.regions]]
+code        = "US"
+freq_start_mhz = 902.0
+freq_end_mhz   = 928.0
+max_tx_dbm  = 30
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "EU_433"
+freq_start_mhz = 433.0
+freq_end_mhz   = 434.0
+max_tx_dbm  = 10
+duty_pct    = 10
+
+[[meshtastic.regions]]
+code        = "EU_868"
+freq_start_mhz = 869.4
+freq_end_mhz   = 869.65
+max_tx_dbm  = 27
+duty_pct    = 10
+
+[[meshtastic.regions]]
+code        = "ANZ"
+freq_start_mhz = 915.0
+freq_end_mhz   = 928.0
+max_tx_dbm  = 30
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "ANZ_433"
+freq_start_mhz = 433.05
+freq_end_mhz   = 434.79
+max_tx_dbm  = 14
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "CN"
+freq_start_mhz = 470.0
+freq_end_mhz   = 510.0
+max_tx_dbm  = 19
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "JP"
+freq_start_mhz = 920.8
+freq_end_mhz   = 927.8
+max_tx_dbm  = 16
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "KR"
+freq_start_mhz = 920.0
+freq_end_mhz   = 923.0
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "TW"
+freq_start_mhz = 920.0
+freq_end_mhz   = 925.0
+max_tx_dbm  = 27
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "RU"
+freq_start_mhz = 868.7
+freq_end_mhz   = 869.2
+max_tx_dbm  = 20
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "IN"
+freq_start_mhz = 865.0
+freq_end_mhz   = 867.0
+max_tx_dbm  = 30
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "NZ_865"
+freq_start_mhz = 864.0
+freq_end_mhz   = 868.0
+max_tx_dbm  = 36
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "TH"
+freq_start_mhz = 920.0
+freq_end_mhz   = 925.0
+max_tx_dbm  = 16
+duty_pct    = 10
+
+[[meshtastic.regions]]
+code        = "UA_433"
+freq_start_mhz = 433.0
+freq_end_mhz   = 434.7
+max_tx_dbm  = 10
+duty_pct    = 10
+
+[[meshtastic.regions]]
+code        = "UA_868"
+freq_start_mhz = 868.0
+freq_end_mhz   = 868.6
+max_tx_dbm  = 14
+duty_pct    = 1
+
+[[meshtastic.regions]]
+code        = "MY_433"
+freq_start_mhz = 433.0
+freq_end_mhz   = 435.0
+max_tx_dbm  = 20
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "MY_919"
+freq_start_mhz = 919.0
+freq_end_mhz   = 924.0
+max_tx_dbm  = 27
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "SG_923"
+freq_start_mhz = 917.0
+freq_end_mhz   = 925.0
+max_tx_dbm  = 20
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "KZ_433"
+freq_start_mhz = 433.075
+freq_end_mhz   = 434.775
+max_tx_dbm  = 10
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "KZ_863"
+freq_start_mhz = 863.0
+freq_end_mhz   = 868.0
+max_tx_dbm  = 30
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "BR_902"
+freq_start_mhz = 902.0
+freq_end_mhz   = 907.5
+max_tx_dbm  = 30
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "PH_433"
+freq_start_mhz = 433.0
+freq_end_mhz   = 434.7
+max_tx_dbm  = 10
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "PH_868"
+freq_start_mhz = 868.0
+freq_end_mhz   = 869.4
+max_tx_dbm  = 14
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "PH_915"
+freq_start_mhz = 915.0
+freq_end_mhz   = 918.0
+max_tx_dbm  = 24
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "NP_865"
+freq_start_mhz = 865.0
+freq_end_mhz   = 868.0
+duty_pct    = 100
+
+[[meshtastic.regions]]
+code        = "LORA_24"
+freq_start_mhz = 2400.0
+freq_end_mhz   = 2483.5
+max_tx_dbm  = 10
+duty_pct    = 100
+notes       = "2.4 GHz — license-free worldwide"
