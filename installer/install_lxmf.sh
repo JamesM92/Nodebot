@@ -796,20 +796,24 @@ chmod +x "$NODE_PAGE"
 echo "      Written: $NODE_PAGE"
 
 # Write index.mu only if one doesn't already exist.
-# NomadNet has no redirect mechanism, so index.mu is an executable Python
-# script that runs nodebot/nodebot.mu as a subprocess and passes its output
-# straight through — the visitor sees the nodebot page with no intermediate screen.
+# NomadNet has no redirect mechanism; index.mu is an executable Python script
+# that runs the target page as a subprocess and pipes stdout through, so
+# visitors land directly on the nodebot page with no intermediate screen.
 INDEX_PAGE="$PAGES_DIR/index.mu"
 if [ ! -f "$INDEX_PAGE" ]; then
     cat > "$INDEX_PAGE" << 'INDEX_EOF'
 #!/usr/bin/python3
 import subprocess, os, sys
-page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodebot", "nodebot.mu")
+
+# Set this to the page you want to redirect to, relative to the pages/ directory
+TARGET = "nodebot/nodebot.mu"
+
+page = os.path.join(os.path.dirname(os.path.abspath(__file__)), *TARGET.split("/"))
 result = subprocess.run([page], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 sys.stdout.buffer.write(result.stdout)
 INDEX_EOF
     chmod +x "$INDEX_PAGE"
-    echo "      Written: $INDEX_PAGE (transparent pass-through → nodebot/nodebot.mu)"
+    echo "      Written: $INDEX_PAGE (pass-through → nodebot/nodebot.mu)"
 else
     echo "      Skipped: $INDEX_PAGE already exists (custom page preserved)"
     echo "      Node page accessible at: /page/nodebot/nodebot.mu"
