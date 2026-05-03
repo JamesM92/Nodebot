@@ -51,7 +51,7 @@ Each detected rNode gets a permanent symlink:
 Rules are written to `/etc/udev/rules.d/99-rnode.rules`. When an rNode is unplugged and replugged, the symlink is recreated automatically and RNS reconnects without any manual intervention.
 
 ### 5. Region / frequency selection
-You are prompted to select your region from a list of community-reported frequency settings sourced from the [Reticulum wiki](https://github.com/markqvist/Reticulum/wiki/Popular-RNode-Settings).
+You are prompted to select your region from a list of community-reported frequency settings. Preset data is stored in `docs/radio_settings/presets.toml` (sourced from the [Reticulum wiki](https://github.com/markqvist/Reticulum/wiki/Popular-RNode-Settings)).
 
 > **You are solely responsible for ensuring your chosen frequency, bandwidth, and power settings comply with local radio regulations.**
 
