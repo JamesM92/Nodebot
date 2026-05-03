@@ -106,6 +106,20 @@ if (( ${#PORTS[@]} == 0 )); then
     exit 1
 fi
 
+# ── Stop NodeBot before probing so it doesn't hold ports ─────
+_NODEBOT_WAS_RUNNING=false
+if systemctl is-active --quiet nodebot 2>/dev/null; then
+    echo "  NodeBot is running and may hold serial ports, causing probe failures."
+    printf "  Stop NodeBot during probing? (recommended) (yes/no): "
+    read -r _STOP_FOR_PROBE || true
+    if [[ "${_STOP_FOR_PROBE,,}" == "yes" ]]; then
+        sudo systemctl stop nodebot
+        _NODEBOT_WAS_RUNNING=true
+        echo "  NodeBot stopped."
+    fi
+    echo ""
+fi
+
 # ── Step 4: Pre-scan — probe every device for every protocol ──
 echo "  Probing ${#PORTS[@]} device(s) — this may take up to 10 seconds per device..."
 echo ""
@@ -183,7 +197,8 @@ for i in "${!PORTS[@]}"; do
                 RNODECONF="${USER_BIN}/rnodeconf"
                 command -v rnodeconf &>/dev/null && RNODECONF="rnodeconf"
                 rn_out=$(timeout 6 "$RNODECONF" --info "$port" 2>&1 || true)
-                if echo "$rn_out" | grep -qi "rnode\|firmware\|device"; then
+                if echo "$rn_out" | grep -qi "rnode\|firmware\|device" && \
+                   ! echo "$rn_out" | grep -qi "did not respond\|not respond\|no device\|permission denied"; then
                     fw=$(echo "$rn_out" | grep -i "firmware" | head -1 | sed 's/.*: *//' || true)
                     result="OK:${fw:-rNode detected}"
                 else
@@ -428,6 +443,9 @@ stop_service=false
 if systemctl is-active --quiet nodebot 2>/dev/null; then
     echo "  Stopping nodebot service..."
     sudo systemctl stop nodebot
+    stop_service=true
+elif $_NODEBOT_WAS_RUNNING; then
+    # Already stopped for probing — still need to restart after
     stop_service=true
 fi
 
