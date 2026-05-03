@@ -1,0 +1,181 @@
+#!/usr/bin/python3
+# NodeBot NomadNet info page — deployed by install_lxmf.sh
+#
+# NOTE: PROJECT_DIR_PLACEHOLDER below is substituted at install time.
+# Do not edit the deployed copy directly — edit this template and re-run the installer.
+
+import os
+import re
+import glob
+import json
+import importlib.util
+import configparser
+
+PROJECT_DIR = "PROJECT_DIR_PLACEHOLDER"
+CONFIG_PATH = os.path.join(PROJECT_DIR, "config.ini")
+README_PATH = os.path.join(PROJECT_DIR, "README.md")
+
+# ── Read config ───────────────────────────────────────────────
+config = configparser.ConfigParser()
+config.read(CONFIG_PATH)
+
+bot_name  = config.get("bot", "name",         fallback="NodeBot").strip()
+storage   = os.path.expanduser(
+    config.get("bot", "storage_path", fallback="~/.nodebot/lxmf_storage").strip()
+)
+mesh_port = config.get("meshtastic", "port", fallback="").strip()
+mc_port   = config.get("meshcore",   "port", fallback="").strip()
+
+# ── Protocol install detection ────────────────────────────────
+def _pkg_installed(name):
+    """True if package is importable from system Python or the project venv."""
+    if importlib.util.find_spec(name) is not None:
+        return True
+    pattern = os.path.join(PROJECT_DIR, ".venv/lib/python*/site-packages", name)
+    return bool(glob.glob(pattern))
+
+lxmf_available = _pkg_installed("RNS")
+mesh_available  = bool(mesh_port) and _pkg_installed("meshtastic")
+mc_available    = bool(mc_port)   and _pkg_installed("meshcore")
+
+# ── LXMF address ─────────────────────────────────────────────
+lxmf_addr = None
+if lxmf_available:
+    id_path = os.path.join(storage, "identity")
+    if os.path.isfile(id_path):
+        try:
+            import RNS
+            identity  = RNS.Identity.from_file(id_path)
+            dest_hash = RNS.Destination.hash(identity, "lxmf", "delivery")
+            lxmf_addr = dest_hash.hex()
+        except Exception:
+            lxmf_addr = "unavailable"
+    else:
+        lxmf_addr = "start NodeBot once to generate"
+
+# ── Meshtastic node ID ────────────────────────────────────────
+mesh_addr = None
+if mesh_available:
+    lora_json = os.path.join(storage, "meshtastic_lora.json")
+    if os.path.isfile(lora_json):
+        try:
+            with open(lora_json) as f:
+                d = json.load(f)
+            num = d.get("my_node_num")
+            if num:
+                mesh_addr = "mesh:{:08x}".format(int(num))
+        except Exception:
+            pass
+    if mesh_addr is None:
+        mesh_addr = "mesh:[start NodeBot to populate]"
+
+# ── MeshCore ─────────────────────────────────────────────────
+mc_addr = None
+if mc_available:
+    mc_json = os.path.join(storage, "meshcore_node.json")
+    if os.path.isfile(mc_json):
+        try:
+            with open(mc_json) as f:
+                d = json.load(f)
+            pubkey = d.get("public_key", "")
+            if pubkey:
+                mc_addr = "mc:" + pubkey[:8]
+        except Exception:
+            pass
+    if mc_addr is None:
+        mc_addr = "mc:[start NodeBot to populate]"
+
+# ── README → Micron conversion ────────────────────────────────
+def md_to_micron(text):
+    out = []
+    in_code = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+
+        if line.startswith("```"):
+            in_code = not in_code
+            out.append("")
+            continue
+
+        if in_code:
+            out.append("  " + line)
+            continue
+
+        if line.startswith("### "):
+            out.append("")
+            out.append("`_" + line[4:] + "`_")
+            continue
+
+        if line.startswith("## "):
+            out.append(">")
+            out.append("`!" + line[3:] + "`!")
+            out.append("")
+            continue
+
+        if line.startswith("# "):
+            continue  # top-level title already shown in header
+
+        if line.rstrip("-") == "" and len(line) >= 3:
+            out.append(">")
+            continue
+
+        # Table separator rows — skip
+        if re.match(r'^\|[-| :]+\|$', line):
+            continue
+
+        # Table data rows — flatten to text
+        # Strip backticks from cells — unknown backtick tokens eat the next char
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = [re.sub(r'`([^`\n]+)`', r'\1', c) for c in cells]
+            out.append("  " + "   ".join(c for c in cells if c))
+            continue
+
+        # Convert markdown bullets to Micron-safe bullets
+        # Micron treats any line starting with '-' as a horizontal rule
+        if re.match(r'^\s*- ', line):
+            line = re.sub(r'^(\s*)- ', r'\1+ ', line)
+
+        # Inline bold and code
+        line = re.sub(r'\*\*(.+?)\*\*', r'`!\1`!', line)
+        line = re.sub(r'`([^`\n]+)`',   r'\1',      line)
+
+        out.append(line)
+
+    return "\n".join(out)
+
+# ── Output ────────────────────────────────────────────────────
+print("`c`!" + bot_name + "`!")
+print("`cMulti-Protocol Mesh Network Node")
+print("`l")
+print("")
+print(">")
+print("`!Network Addresses`!")
+print("")
+print("`_Node Name`_")
+print(bot_name)
+print("")
+if lxmf_available:
+    print("`_LXMF / Reticulum`_")
+    print("lxmf:" + (lxmf_addr or "unavailable"))
+    print("")
+if mesh_addr is not None:
+    print("`_Meshtastic`_")
+    print(mesh_addr)
+    print("")
+if mc_addr is not None:
+    print("`_MeshCore`_")
+    print(mc_addr)
+    print("")
+
+if os.path.isfile(README_PATH):
+    with open(README_PATH, encoding="utf-8") as f:
+        readme = f.read()
+    print(md_to_micron(readme))
+else:
+    print(">")
+    print("README not found at " + README_PATH)
+
+print("")
+print(">")
+print("`c`[github.com/JamesM92/NodeBot`Fbbf`]")

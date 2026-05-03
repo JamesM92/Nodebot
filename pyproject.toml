@@ -1,6 +1,6 @@
 [project]
 name = "nodebot"
-version = "0.3.0"
+version = "0.3.1"
 description = "Multi-protocol mesh network chatbot for Raspberry Pi"
 readme = "README.md"
 requires-python = ">=3.13"

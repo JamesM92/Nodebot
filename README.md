@@ -291,13 +291,14 @@ NodeBot/
 │   ├── install_lxmf.sh     # LXMF + NomadNet + rNode installer
 │   ├── install_meshcore.sh # MeshCore radio installer
 │   ├── install_meshtastic.sh # Meshtastic radio installer
-│   ├── reassign_usb.sh     # USB port reassignment utility
 │   ├── wait_for_rns.sh     # startup helper (waits for RNS socket)
 │   ├── nodebot.service     # systemd service template
 │   └── nomadnet.service    # systemd service template
 ├── scripts/
 │   ├── chanlisten          # MeshCore channel monitor CLI
-│   └── announce.sh         # manual network announce helper
+│   ├── announce.sh         # manual network announce helper
+│   ├── reassign_usb.sh     # USB port reassignment utility
+│   └── uninstall_lxmf.sh   # remove LXMF/NomadNet install
 ├── docs/
 │   ├── lxmf-setup.md
 │   └── radio_settings/     # developer reference: frequencies, modem params, sync words

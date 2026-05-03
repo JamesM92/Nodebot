@@ -9,7 +9,7 @@
 # ports, or if you are replacing a radio with a new one.
 #
 # Usage:
-#   bash installer/reassign_usb.sh
+#   bash scripts/reassign_usb.sh
 # ============================================================
 
 set -euo pipefail
