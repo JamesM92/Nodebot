@@ -600,11 +600,11 @@ read -r HOST_PAGE || true
 echo ""
 
 PAGES_DIR="$HOME/.nomadnetwork/storage/pages"
-NODE_PAGE="$PAGES_DIR/nodebot.mu"
+NODE_PAGE="$PAGES_DIR/nodebot/nodebot.mu"
 
 if [[ "${HOST_PAGE,,}" == "yes" ]]; then
 
-mkdir -p "$PAGES_DIR"
+mkdir -p "$PAGES_DIR/nodebot"
 echo "  Writing node page..."
 
 # Write the page as a Python script using a quoted heredoc to avoid bash
@@ -795,14 +795,24 @@ sed -i "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$NODE_PAGE"
 chmod +x "$NODE_PAGE"
 echo "      Written: $NODE_PAGE"
 
-# Write index.mu only if one doesn't already exist
+# Write index.mu only if one doesn't already exist.
+# NomadNet has no redirect mechanism, so index.mu is an executable Python
+# script that runs nodebot/nodebot.mu as a subprocess and passes its output
+# straight through — the visitor sees the nodebot page with no intermediate screen.
 INDEX_PAGE="$PAGES_DIR/index.mu"
 if [ ! -f "$INDEX_PAGE" ]; then
-    cp "$NODE_PAGE" "$INDEX_PAGE"
-    echo "      Written: $INDEX_PAGE (default landing page)"
+    cat > "$INDEX_PAGE" << 'INDEX_EOF'
+#!/usr/bin/python3
+import subprocess, os, sys
+page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodebot", "nodebot.mu")
+result = subprocess.run([page], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+sys.stdout.buffer.write(result.stdout)
+INDEX_EOF
+    chmod +x "$INDEX_PAGE"
+    echo "      Written: $INDEX_PAGE (transparent pass-through → nodebot/nodebot.mu)"
 else
     echo "      Skipped: $INDEX_PAGE already exists (custom page preserved)"
-    echo "      Node page accessible at: /page/nodebot.mu"
+    echo "      Node page accessible at: /page/nodebot/nodebot.mu"
 fi
 
 # Enable node hosting in NomadNet config
