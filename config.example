@@ -43,6 +43,13 @@ password = changeme
 # port = /dev/meshcore0
 # baudrate = 115200
 
+# Comma-separated list of channels to configure on the device at startup.
+# Slots are assigned in order starting at index 1 (index 0 is always "Public").
+# A slot is only written if it is currently empty — existing names are never
+# overwritten.  Channel names beginning with '#' use a key derived from the
+# name (standard MeshCore convention); all other names use the same derivation.
+# channels = #test
+
 [meshtastic]
 # Serial port for the Meshtastic radio. The installer creates a stable udev
 # symlink at /dev/meshtastic0 so this path survives USB reconnects.
@@ -88,15 +95,18 @@ password = changeme
 # script =
 
 [logging]
-# Optional append-only log files. Leave blank or omit to disable.
+# Optional log files. Leave blank or omit to disable.
 # channel_log logs all public channel/broadcast messages from any transport.
 # dm_log logs all direct messages sent to this node from any transport.
-# announce_log logs node announces from all transports, including GPS coordinates
-#   (Meshtastic POSITION_APP/NODEINFO_APP, MeshCore contacts, LXMF senders).
+# announce_db stores node announces in a SQLite database (recommended).
+#   Keeps the last 50 unique nodes, with up to 3 announce history per node.
+#   Includes GPS, RF stats, and modem preset. Read by the NomadNet activity page.
 # ~ expands to the home directory of the user running NodeBot.
 channel_log = ~/.nodebot/logs/channel.log
 dm_log = ~/.nodebot/logs/dm.log
-announce_log = ~/.nodebot/logs/announce.log
+announce_db = ~/.nodebot/logs/announces.db
+# announce_log (legacy plain-text fallback — used only if announce_db is not set)
+# announce_log = ~/.nodebot/logs/announce.log
 # When true (default), LXMF announces are not logged. NodeBot connects to the
 # RNS shared instance (NomadNet/rnsd) as a client, so all announces arrive via
 # the same local socket regardless of whether they originated on LoRa or a TCP

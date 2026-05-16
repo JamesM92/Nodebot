@@ -317,6 +317,7 @@ class LXMFAdapter:
             else:
                 # Identity unknown — request path immediately so the announce
                 # arrives before we try to send the reply.
+                print(f"[lxmf_adapter] source identity unknown for {RNS.prettyhexrep(sender_hash)}, requesting path")
                 try:
                     RNS.Transport.request_path(sender_hash)
                     RNS.log(
@@ -406,7 +407,7 @@ class LXMFAdapter:
                 dest,
                 self.delivery_destination,
                 content,
-                desired_method=LXMF.LXMessage.DIRECT
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC
             )
 
             if notify_cb:
@@ -416,6 +417,7 @@ class LXMFAdapter:
 
             self.router.handle_outbound(msg)
 
+            print(f"[lxmf_adapter] sent reply to {RNS.prettyhexrep(destination_hash)}")
             RNS.log(
                 f"[lxmf_adapter] sent to {RNS.prettyhexrep(destination_hash)}",
                 RNS.LOG_NOTICE
@@ -456,13 +458,14 @@ class LXMFAdapter:
                     dest,
                     self.delivery_destination,
                     content,
-                    desired_method=LXMF.LXMessage.DIRECT
+                    desired_method=LXMF.LXMessage.OPPORTUNISTIC
                 )
                 if notify_cb:
                     def _on_delivery(message):
                         notify_cb(message.state == LXMF.LXMessage.DELIVERED)
                     msg.delivery_callback = _on_delivery
                 self.router.handle_outbound(msg)
+                print(f"[lxmf_adapter] sent reply to {RNS.prettyhexrep(destination_hash)} after path discovery (attempt {attempt+1})")
                 RNS.log(
                     f"[lxmf_adapter] sent to {RNS.prettyhexrep(destination_hash)} after path discovery (attempt {attempt+1})",
                     RNS.LOG_NOTICE

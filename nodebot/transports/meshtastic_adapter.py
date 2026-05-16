@@ -8,6 +8,19 @@ import time
 
 from .. import logger
 
+_PRESET_ABBR = {
+    "LONG_FAST":      "LF",
+    "LONG_SLOW":      "LS",
+    "LONG_MODERATE":  "LM",
+    "LONG_MOD":       "LM",
+    "MEDIUM_FAST":    "MF",
+    "MEDIUM_SLOW":    "MS",
+    "SHORT_FAST":     "SF",
+    "SHORT_SLOW":     "SS",
+    "SHORT_TURBO":    "ST",
+    "VERY_LONG_SLOW": "VLS",
+}
+
 
 class MeshtasticAdapter:
     """
@@ -19,7 +32,12 @@ class MeshtasticAdapter:
     GPS position is pushed from the shared [gps] config at startup and
     updated periodically. Environmental telemetry is broadcast from the
     [telemetry] config section at a configurable interval.
+
+    CONFIG_SECTION can be overridden by subclasses to read from a different
+    config section (e.g. "meshtastic1" for a second radio).
     """
+
+    CONFIG_SECTION = "meshtastic"
 
     def __init__(self, storage_path, engine):
 
@@ -39,15 +57,17 @@ class MeshtasticAdapter:
         cfg = configparser.ConfigParser()
         cfg.read(_config_path)
 
-        self._node_name = cfg.get("bot",         "name",     fallback="NodeBot").strip()
-        self.port       = cfg.get("meshtastic",  "port",     fallback="/dev/meshtastic0").strip()
-        self.baudrate   = int(cfg.get("meshtastic", "baudrate", fallback="115200").strip())
+        sec = self.CONFIG_SECTION
+
+        self._node_name = cfg.get("bot", "name", fallback="NodeBot").strip()
+        self.port       = cfg.get(sec, "port",     fallback="").strip()
+        self.baudrate   = int(cfg.get(sec, "baudrate", fallback="115200").strip())
 
         # LoRa radio config — applied on connect if region is set
-        self._lora_region  = cfg.get("meshtastic", "region",       fallback="").strip()
-        self._lora_preset  = cfg.get("meshtastic", "modem_preset", fallback="LONG_FAST").strip()
-        self._lora_hops    = int(cfg.get("meshtastic", "hop_limit",  fallback="3").strip())
-        self._lora_power   = int(cfg.get("meshtastic", "tx_power",   fallback="0").strip())
+        self._lora_region  = cfg.get(sec, "region",       fallback="").strip()
+        self._lora_preset  = cfg.get(sec, "modem_preset", fallback="LONG_FAST").strip()
+        self._lora_hops    = int(cfg.get(sec, "hop_limit",  fallback="3").strip())
+        self._lora_power   = int(cfg.get(sec, "tx_power",   fallback="0").strip())
 
         # GPS — shared [gps] section
         self._gps_mode      = cfg.get("gps", "gps_mode",      fallback="disabled").strip()
@@ -70,7 +90,11 @@ class MeshtasticAdapter:
             "pressure":    cfg.get("telemetry", "static_pressure",  fallback="").strip(),
         }
 
-        print(f"[meshtastic_adapter] port={self.port} region={self._lora_region or 'unset'} "
+        if not self.port:
+            print(f"[meshtastic_adapter] [{sec}] port not configured — adapter disabled")
+            return
+
+        print(f"[meshtastic_adapter] [{sec}] port={self.port} region={self._lora_region or 'unset'} "
               f"telemetry={self._tel_mode} gps={self._gps_mode}")
 
     # =====================================================
@@ -78,6 +102,9 @@ class MeshtasticAdapter:
     # =====================================================
 
     def start_worker(self):
+
+        if not self.port:
+            return
 
         if self._thread and self._thread.is_alive():
             print("[meshtastic_adapter] worker already running")
@@ -190,6 +217,8 @@ class MeshtasticAdapter:
                     time.sleep(delay)
 
     def _on_disconnect(self, interface, topic=None):
+        if interface is not self._iface:
+            return
         print("[meshtastic_adapter] connection lost")
         try:
             if interface is not None:
@@ -208,12 +237,15 @@ class MeshtasticAdapter:
         # LoRa radio settings (skipped if region is blank or already applied)
         self._apply_lora_config()
 
+        # Set node name and announce (skipped if name already matches saved state).
+        # Must run before the unconditional _save_lora_state below, otherwise
+        # _save_lora_state writes node_name to the file first and announce()
+        # sees it as already applied, causing setOwner to be permanently skipped.
+        self.announce()
+
         # Always persist node num — _apply_lora_config skips the save when
         # settings are unchanged, so my_node_num would never be written.
         self._save_lora_state()
-
-        # Set node name and announce (skipped if name already matches saved state)
-        self.announce()
 
         # Initial GPS push
         self._push_gps(force=True)
@@ -247,7 +279,7 @@ class MeshtasticAdapter:
             print(f"[meshtastic_adapter] LoRa config failed: {e}")
 
     def _lora_state_path(self):
-        return os.path.join(self.storage_path, "meshtastic_lora.json")
+        return os.path.join(self.storage_path, f"{self.CONFIG_SECTION}_lora.json")
 
     def _lora_state_matches(self):
         try:
@@ -268,7 +300,7 @@ class MeshtasticAdapter:
         except Exception:
             return False
 
-    def _save_lora_state(self):
+    def _save_lora_state(self, save_name=False):
         try:
             os.makedirs(self.storage_path, exist_ok=True)
             existing = {}
@@ -282,8 +314,9 @@ class MeshtasticAdapter:
                 "modem_preset": self._lora_preset,
                 "hop_limit":    self._lora_hops,
                 "tx_power":     self._lora_power,
-                "node_name":    self._node_name,
             }
+            if save_name:
+                update["node_name"] = self._node_name
             if self._my_node_num is not None:
                 update["my_node_num"] = self._my_node_num
             existing.update(update)
@@ -297,6 +330,9 @@ class MeshtasticAdapter:
     # =====================================================
 
     def _on_receive(self, packet, interface):
+
+        if interface is not self._iface:
+            return
 
         try:
             decoded = packet.get("decoded", {})
@@ -314,16 +350,36 @@ class MeshtasticAdapter:
             if portnum != "TEXT_MESSAGE_APP":
                 return
 
-            text = decoded.get("text", "").strip()
+            to_id  = packet.get("toId", "")
+            to_num = packet.get("to")
+            text   = decoded.get("text", "").strip()
+
             if not text:
                 return
 
-            to_id   = packet.get("toId",   "")
+            # Treat as broadcast only when explicitly addressed to all nodes.
+            # If toId is missing (library couldn't resolve the node ID), fall back
+            # to the raw numeric "to" field — 0xFFFFFFFF is the broadcast address.
+            is_broadcast = to_id in ("^all", "!ffffffff") or to_num == 0xFFFFFFFF
+            if not to_id and to_num is not None and to_num != 0xFFFFFFFF:
+                # toId unpopulated but "to" points to a specific node — DM
+                is_broadcast = False
+            elif not to_id and to_num is None:
+                # Both missing — assume broadcast (safety fallback)
+                is_broadcast = True
 
             # Log and ignore channel broadcasts
-            if not to_id or to_id in ("^all", "!ffffffff"):
-                display = from_id.lstrip("!").lower()
-                logger.log_channel("meshtastic", display, text)
+            if is_broadcast:
+                addr = from_id.lstrip("!").lower()
+                node_info = (self._iface.nodes or {}).get(from_id, {}) if self._iface else {}
+                user = node_info.get("user", {})
+                long_name  = user.get("longName")  or None
+                short_name = user.get("shortName") or None
+                hops = packet.get("hopLimit")
+                preset_abbr = _PRESET_ABBR.get(self._lora_preset.upper(), self._lora_preset)
+                proto_tag = f"meshtastic:{preset_abbr}"
+                logger.log_channel(proto_tag, addr, text,
+                                   long_name=long_name, short_name=short_name, hops=hops)
                 return
 
             sender = f"mesh:{from_id.lstrip('!').lower()}"
@@ -333,8 +389,9 @@ class MeshtasticAdapter:
                 node_info = (self._iface.nodes or {}).get(from_id, {})
                 nick = node_info.get("user", {}).get("longName") or None
 
+            preset_abbr = _PRESET_ABBR.get(self._lora_preset.upper(), self._lora_preset)
             print(f"[meshtastic_adapter] msg from {sender}: {text!r}")
-            logger.log_dm("meshtastic", sender, text)
+            logger.log_dm(f"meshtastic:{preset_abbr}", sender, text, nick=nick)
 
             if self.engine:
                 self.engine.handle_message(
@@ -368,6 +425,7 @@ class MeshtasticAdapter:
                 "meshtastic", addr,
                 lat=lat, lon=lon, alt=alt,
                 rssi=rssi, snr=snr, hops=hops, battery=battery,
+                modem_preset=self._lora_preset,
             )
         except Exception as e:
             print(f"[meshtastic_adapter] position announce log error: {e}")
@@ -387,7 +445,9 @@ class MeshtasticAdapter:
             addr = from_id.lstrip("!").lower() if from_id else node_id or "unknown"
             logger.log_announce(
                 "meshtastic", addr,
-                nick=nick, rssi=rssi, snr=snr, hops=hops,
+                nick=nick, short_name=short_name or None,
+                rssi=rssi, snr=snr, hops=hops,
+                modem_preset=self._lora_preset,
             )
         except Exception as e:
             print(f"[meshtastic_adapter] nodeinfo announce log error: {e}")
@@ -628,7 +688,7 @@ class MeshtasticAdapter:
             # the name is already set to avoid a reboot on every NodeBot restart.
             if not self._node_name_matches_saved():
                 self._iface.localNode.setOwner(long_name=self._node_name)
-                self._save_lora_state()
+                self._save_lora_state(save_name=True)
                 print(f"[meshtastic_adapter] node name set: {self._node_name}")
             if self._last_gps_lat is not None:
                 self._iface.localNode.setFixedPosition(
