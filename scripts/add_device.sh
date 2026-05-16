@@ -450,21 +450,25 @@ else
 fi
 
 if [[ -f "$CONFIG_INI" ]]; then
-    # Check if section already present
+    _run_config=true
     if python3 -c "
 import configparser, sys
 c = configparser.ConfigParser()
 c.read('$CONFIG_INI')
 sys.exit(0 if '$_cfg_sec' in c else 1)
 " 2>/dev/null; then
-        echo "  config.ini already has [$_cfg_sec] — no changes made."
-    else
+        echo "  config.ini already has [$_cfg_sec]."
+        printf "  Update radio settings for this section? (yes/no): "
+        read -r _UPDATE_SEC || true
+        [[ "${_UPDATE_SEC,,}" == "yes" ]] || _run_config=false
+    fi
+
+    if $_run_config; then
         echo ""
         echo "  ── config.ini update ───────────────────────────────────"
 
         case "$SEL_PROTO" in
         meshtastic)
-            # Full radio configuration via shared library (region, preset, hop limit, TX power, program radio)
             meshtastic_configure_radio "$_cfg_sec" "/dev/$NEW_SYM" "$CONFIG_INI" "$VENV_PYTHON"
             ;;
         meshcore)
