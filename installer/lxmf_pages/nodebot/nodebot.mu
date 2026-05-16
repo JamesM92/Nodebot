@@ -23,8 +23,7 @@ bot_name  = config.get("bot", "name",         fallback="NodeBot").strip()
 storage   = os.path.expanduser(
     config.get("bot", "storage_path", fallback="~/.nodebot/lxmf_storage").strip()
 )
-mesh_port = config.get("meshtastic", "port", fallback="").strip()
-mc_port   = config.get("meshcore",   "port", fallback="").strip()
+mc_port     = config.get("meshcore", "port", fallback="").strip()
 
 # ── Protocol install detection ────────────────────────────────
 def _pkg_installed(name):
@@ -34,9 +33,20 @@ def _pkg_installed(name):
     pattern = os.path.join(PROJECT_DIR, ".venv/lib/python*/site-packages", name)
     return bool(glob.glob(pattern))
 
-lxmf_available = _pkg_installed("RNS")
-mesh_available  = bool(mesh_port) and _pkg_installed("meshtastic")
-mc_available    = bool(mc_port)   and _pkg_installed("meshcore")
+lxmf_available   = _pkg_installed("RNS")
+mesh_lib_present = _pkg_installed("meshtastic")
+mc_available     = bool(mc_port) and _pkg_installed("meshcore")
+
+# ── Collect all configured Meshtastic adapters ────────────────
+# Scans [meshtastic], [meshtastic1], [meshtastic2], … in config.
+mesh_adapters = []  # list of (label, port, preset, json_path)
+for sec in config.sections():
+    if sec == "meshtastic" or re.match(r"^meshtastic\d+$", sec):
+        port   = config.get(sec, "port",         fallback="").strip()
+        preset = config.get(sec, "modem_preset", fallback="LONG_FAST").strip()
+        if port and mesh_lib_present:
+            json_name = f"{sec}_lora.json"
+            mesh_adapters.append((sec, port, preset, json_name))
 
 # ── LXMF address ─────────────────────────────────────────────
 lxmf_addr = None
@@ -53,21 +63,19 @@ if lxmf_available:
     else:
         lxmf_addr = "start NodeBot once to generate"
 
-# ── Meshtastic node ID ────────────────────────────────────────
-mesh_addr = None
-if mesh_available:
-    lora_json = os.path.join(storage, "meshtastic_lora.json")
+# ── Meshtastic node IDs (one per configured adapter) ─────────
+def _mesh_addr_for(json_name):
+    lora_json = os.path.join(storage, json_name)
     if os.path.isfile(lora_json):
         try:
             with open(lora_json) as f:
                 d = json.load(f)
             num = d.get("my_node_num")
             if num:
-                mesh_addr = "mesh:{:08x}".format(int(num))
+                return "mesh:{:08x}".format(int(num))
         except Exception:
             pass
-    if mesh_addr is None:
-        mesh_addr = "mesh:[start NodeBot to populate]"
+    return "mesh:[start NodeBot to populate]"
 
 # ── MeshCore ─────────────────────────────────────────────────
 mc_addr = None
@@ -145,8 +153,8 @@ def md_to_micron(text):
     return "\n".join(out)
 
 # ── Output ────────────────────────────────────────────────────
-print("`c`!" + bot_name + "`!")
-print("`cMulti-Protocol Mesh Network Node")
+print("`!" + bot_name + "`!")
+print("Multi-Protocol Mesh Network Node")
 print("`l")
 print("")
 print(">")
@@ -159,14 +167,18 @@ if lxmf_available:
     print("`_LXMF / Reticulum`_")
     print("lxmf:" + (lxmf_addr or "unavailable"))
     print("")
-if mesh_addr is not None:
-    print("`_Meshtastic`_")
-    print(mesh_addr)
+for _sec, _port, _preset, _json in mesh_adapters:
+    _addr  = _mesh_addr_for(_json)
+    _label = "Meshtastic" if _sec == "meshtastic" else f"Meshtastic ({_sec})"
+    print(f"`_{_label}`_")
+    print(_addr + "  (" + _preset.replace("_", " ").title() + ")")
     print("")
 if mc_addr is not None:
     print("`_MeshCore`_")
     print(mc_addr)
     print("")
+print("`Fbbf`[Activity Feed`:/page/nodebot/activity.mu`]`f")
+print("")
 
 if os.path.isfile(README_PATH):
     with open(README_PATH, encoding="utf-8") as f:
@@ -178,4 +190,4 @@ else:
 
 print("")
 print(">")
-print("`c`[github.com/JamesM92/NodeBot`Fbbf`]")
+print("`[github.com/JamesM92/NodeBot`Fbbf`]")

@@ -24,40 +24,8 @@ CONFIG_INI="$PROJECT_DIR/config.ini"
 UDEV_RULES="/etc/udev/rules.d/99-meshcore.rules"
 DEFAULT_BAUD=115200
 
-# ── Region / modulation preset data ──────────────────────────
-# Loaded from docs/radio_settings/presets.toml via Python (tomllib, stdlib ≥3.11).
-# Produces parallel arrays: MC_PRESET_COUNT, MC_PRESET_REGIONS, MC_PRESET_FREQS,
-#   MC_PRESET_BWS, MC_PRESET_SFS, MC_PRESET_CRS
-_PRESETS_TMP="$(mktemp)"
-"$VENV_PYTHON" - "$PROJECT_DIR/docs/radio_settings/presets.toml" "$_PRESETS_TMP" <<'PYEOF'
-import sys, tomllib
-
-toml_path, out_path = sys.argv[1], sys.argv[2]
-with open(toml_path, "rb") as fh:
-    data = tomllib.load(fh)
-
-presets = data["meshcore"]["presets"]
-
-regions = " ".join(f'"{p["region"]}"' for p in presets)
-freqs   = " ".join(str(p["freq_mhz"]) for p in presets)
-bws     = " ".join(str(p["bw_khz"])   for p in presets)
-sfs     = " ".join(str(p["sf"])       for p in presets)
-crs     = " ".join(str(p["cr"])       for p in presets)
-
-lines = [
-    f"MC_PRESET_COUNT={len(presets)}",
-    f"MC_PRESET_REGIONS=({regions})",
-    f"MC_PRESET_FREQS=({freqs})",
-    f"MC_PRESET_BWS=({bws})",
-    f"MC_PRESET_SFS=({sfs})",
-    f"MC_PRESET_CRS=({crs})",
-]
-with open(out_path, "w") as fh:
-    fh.write("\n".join(lines) + "\n")
-PYEOF
-# shellcheck source=/dev/null
-source "$_PRESETS_TMP"
-rm -f "$_PRESETS_TMP"
+# shellcheck source=../scripts/_meshcore_config.sh
+source "$PROJECT_DIR/scripts/_meshcore_config.sh"
 
 echo ""
 echo "================================================"
@@ -66,33 +34,6 @@ echo "================================================"
 echo "  Project : $PROJECT_DIR"
 echo "  Venv    : $VENV"
 echo "================================================"
-echo ""
-
-# ── Legal disclaimer ──────────────────────────────────────────
-echo "  ╔═════════════════════════════════════════════════════╗"
-echo "  ║               ⚠  LEGAL NOTICE  ⚠                   ║"
-echo "  ║                                                     ║"
-echo "  ║  Radio frequency settings are regulated by law      ║"
-echo "  ║  and vary by country and region.                    ║"
-echo "  ║                                                     ║"
-echo "  ║  The presets below are community-recommended        ║"
-echo "  ║  starting points from the MeshCore project.         ║"
-echo "  ║  They are NOT official guidance and may not be      ║"
-echo "  ║  legal in your jurisdiction.                        ║"
-echo "  ║                                                     ║"
-echo "  ║  YOU are solely responsible for ensuring your       ║"
-echo "  ║  chosen frequency complies with local radio laws.   ║"
-echo "  ║  Consult your national telecommunications           ║"
-echo "  ║  authority before transmitting.                     ║"
-echo "  ╚═════════════════════════════════════════════════════╝"
-echo ""
-printf "  I understand and accept responsibility (yes/no): "
-read -r ACCEPT || true
-if [[ "${ACCEPT,,}" != "yes" ]]; then
-    echo ""
-    echo "  Aborted. Please review local radio regulations before proceeding."
-    exit 1
-fi
 echo ""
 
 # ── Helper: pick from a numbered list ────────────────────────
@@ -114,13 +55,13 @@ udev_prop() {
 }
 
 # ── Step 1: Install meshcore into the project venv ───────────
-echo "[1/5] Installing meshcore Python package..."
+echo "[1/4] Installing meshcore Python package..."
 "$VENV_PIP" install --upgrade meshcore
 echo "      meshcore $("$VENV_PIP" show meshcore 2>/dev/null | awk '/^Version:/{print $2}') installed."
 
 # ── Step 2: Detect MeshCore radio on USB ports ───────────────
 echo ""
-echo "[2/5] Detecting MeshCore radio on USB ports..."
+echo "[2/4] Detecting MeshCore radio on USB ports..."
 echo ""
 
 PROBE_SCRIPT=$(cat <<'PYEOF'
@@ -214,7 +155,7 @@ fi
 CHOSEN_PORT="${MESHCORE_PORTS[$CHOSEN_IDX]}"
 
 # ── Step 3: Create udev rule for stable /dev/meshcore0 ───────
-echo "[3/5] Creating udev symlink for stable device naming..."
+echo "[3/4] Creating udev symlink for stable device naming..."
 echo ""
 echo "  This creates /dev/meshcore0 tied to the device's USB identity."
 echo "  When unplugged and replugged (any port), the symlink is recreated"
@@ -425,201 +366,18 @@ if [ -e "/dev/meshcore0" ] && [ -e "/dev/rnode0" ]; then
 fi
 echo ""
 
-# ── Step 4: Region / frequency selection and radio programming ─
-echo "[4/5] Radio frequency configuration"
-echo ""
-echo "  Select your region:"
-for (( _i=0; _i<MC_PRESET_COUNT; _i++ )); do
-    printf "    %d) %-36s  %s MHz  BW=%s kHz  SF=%s  CR=4/%s\n" \
-        $((_i+1)) \
-        "${MC_PRESET_REGIONS[$_i]}" \
-        "${MC_PRESET_FREQS[$_i]}" \
-        "${MC_PRESET_BWS[$_i]}" \
-        "${MC_PRESET_SFS[$_i]}" \
-        "${MC_PRESET_CRS[$_i]}"
-done
-printf "    %d) Manual entry\n" $(( MC_PRESET_COUNT + 1 ))
+# ── Steps 4+5: Region / frequency configuration and config.ini update ─
+echo "[4/4] Radio frequency configuration"
+meshcore_configure_radio "meshcore" "$ACTIVE_PORT" "$CONFIG_INI" "$VENV_PYTHON" "$PROJECT_DIR"
 echo ""
 
-REGION=$(pick "Region" $(( MC_PRESET_COUNT + 1 )))
-REGION_LABEL=""
-
-if (( REGION <= MC_PRESET_COUNT )); then
-    _idx=$(( REGION - 1 ))
-    REGION_LABEL="${MC_PRESET_REGIONS[$_idx]}"
-    MC_FREQ="${MC_PRESET_FREQS[$_idx]}"
-    MC_BW="${MC_PRESET_BWS[$_idx]}"
-    MC_SF="${MC_PRESET_SFS[$_idx]}"
-    MC_CR="${MC_PRESET_CRS[$_idx]}"
-else
-    printf "  Frequency in MHz (e.g. 910.525): "
-    read -r MC_FREQ || true
-    printf "  Bandwidth in kHz (e.g. 62.5):    "
-    read -r MC_BW   || true
-    printf "  Spreading factor (e.g. 7):       "
-    read -r MC_SF   || true
-    printf "  Coding rate denominator (e.g. 5): "
-    read -r MC_CR   || true
-    REGION_LABEL="Custom"
-fi
-
-echo ""
-echo "  ── Forwarding / repeater configuration ─────────────"
-echo "  This radio will forward messages it hears onto the mesh."
-echo "  The hop limit controls how many times a packet may be"
-echo "  relayed before it is dropped (max allowed: 64)."
-echo "  Enter 0 to disable forwarding entirely."
-echo ""
-printf "  Max hops [0-64, default 64]: "
-read -r HOP_INPUT || true
-if [[ "$HOP_INPUT" =~ ^[0-9]+$ ]] && (( HOP_INPUT >= 0 && HOP_INPUT <= 64 )); then
-    MC_REPEAT="$HOP_INPUT"
-else
-    MC_REPEAT=64
-    if [[ -n "$HOP_INPUT" ]]; then
-        echo "  Invalid entry — using default of 64."
-    fi
-fi
-echo ""
-
-if (( MC_REPEAT == 0 )); then
-    FORWARD_LABEL="disabled"
-else
-    FORWARD_LABEL="enabled (max ${MC_REPEAT} hops)"
-fi
-
-echo "  ── Selected radio configuration ────────────────────"
-printf "  Region    : %s\n"          "$REGION_LABEL"
-printf "  Frequency : %s MHz\n"      "$MC_FREQ"
-printf "  Bandwidth : %.0f kHz\n"    "$MC_BW"
-printf "  SF        : %s\n"          "$MC_SF"
-printf "  CR        : %s\n"          "$MC_CR"
-printf "  Forwarding: %s\n"          "$FORWARD_LABEL"
-echo "  ────────────────────────────────────────────────────"
-echo ""
-printf "  Program these settings onto the radio now? (yes/no): "
-read -r DO_PROGRAM || true
-
-if [[ "${DO_PROGRAM,,}" == "yes" ]]; then
-    # Check if NodeBot is holding the port — programming will fail if so
-    if systemctl is-active --quiet nodebot 2>/dev/null; then
-        echo ""
-        echo "  NodeBot is currently running and holds the serial port."
-        printf "  Stop NodeBot now to free the port? (yes/no): "
-        read -r STOP_BOT || true
-        if [[ "${STOP_BOT,,}" == "yes" ]]; then
-            sudo systemctl stop nodebot
-            echo "  NodeBot stopped."
-        else
-            echo "  Skipping radio programming — port is busy."
-            echo "  Settings saved to config.ini and will be applied on next NodeBot start."
-            DO_PROGRAM="no"
-        fi
-    fi
-    echo "  Programming radio..."
-
-    SET_RADIO_SCRIPT=$(cat <<PYEOF
-import sys, asyncio
-
-async def set_radio(port, baud, freq, bw, sf, cr, repeat):
-    from meshcore.meshcore import MeshCore
-    from meshcore.serial_cx import SerialConnection
-    from meshcore.events import EventType
-
-    try:
-        cx = SerialConnection(port, baud)
-        mc = MeshCore(cx)
-        await asyncio.wait_for(mc.connect(), timeout=5)
-        evt = await mc.commands.set_radio(
-            float(freq), float(bw), int(sf), int(cr),
-            repeat=int(repeat)
-        )
-        if evt and evt.type == EventType.ERROR:
-            print(f"ERR:{evt.payload}")
-        else:
-            print("OK")
-        await mc.disconnect()
-    except Exception as e:
-        print(f"ERR:{e}")
-
-asyncio.run(set_radio(
-    sys.argv[1], int(sys.argv[2]),
-    sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
-))
-PYEOF
-)
-
-    result=$("$VENV_PYTHON" -c "$SET_RADIO_SCRIPT" \
-        "$ACTIVE_PORT" "$DEFAULT_BAUD" \
-        "$MC_FREQ" "$MC_BW" "$MC_SF" "$MC_CR" "$MC_REPEAT" 2>/dev/null)
-
-    if [[ "$result" == "OK" ]]; then
-        echo "  Radio programmed successfully."
-    else
-        echo "  ⚠  Programming returned: $result"
-        echo "     Settings may still have been applied — check device logs to confirm."
-    fi
-    # Restart NodeBot if we stopped it to free the port
-    if systemctl is-enabled --quiet nodebot 2>/dev/null && ! systemctl is-active --quiet nodebot 2>/dev/null; then
-        echo ""
-        echo "  Restarting NodeBot..."
-        sudo systemctl start nodebot
-    fi
-else
-    echo "  Skipping radio programming."
-    echo "  You can set these manually with rnodeconf or the MeshCore companion app."
-fi
-echo ""
-
-# ── Step 5: Write [meshcore] section to config.ini ───────────
-echo "[5/5] Updating config.ini..."
-
-if [ ! -f "$CONFIG_INI" ]; then
-    echo "  config.ini not found. Run install_nodebot.sh first."
-    exit 1
-fi
-
-if grep -q "^\[meshcore\]" "$CONFIG_INI"; then
-    echo "  [meshcore] section already present — updating."
-    "$VENV_PYTHON" - "$CONFIG_INI" "$DEFAULT_BAUD" <<'PYEOF'
-import re, sys
-
-path, baud = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    content = f.read()
-
-def replace_in_section(text, section, key, value):
-    """Replace key = ... only within the named section block."""
-    def replacer(m):
-        block = re.sub(r'(?m)^#?\s*' + re.escape(key) + r'\s*=.*$', key + ' = ' + value, m.group(1))
-        return block
-    return re.sub(r'(\[' + re.escape(section) + r'\].*?)(?=\n\[|\Z)', replacer, text, flags=re.DOTALL)
-
-content = replace_in_section(content, 'meshcore', 'port',     '/dev/meshcore0')
-content = replace_in_section(content, 'meshcore', 'baudrate', baud)
-
-with open(path, 'w') as f:
-    f.write(content)
-print("  Updated: port = /dev/meshcore0  baudrate =", baud)
-PYEOF
-else
-    cat >> "$CONFIG_INI" <<CFG
-
-[meshcore]
-port = /dev/meshcore0
-baudrate = $DEFAULT_BAUD
-CFG
-    echo "  Appended [meshcore] section to config.ini"
-fi
-
-echo ""
 echo "================================================"
 echo "  MeshCore installation complete."
 echo "================================================"
 echo ""
-printf "  Region    : %s\n"     "$REGION_LABEL"
-printf "  Frequency : %s MHz\n" "$MC_FREQ"
-printf "  Forwarding: %s\n"     "$FORWARD_LABEL"
+printf "  Region    : %s\n"     "${MESHCORE_REGION_LABEL:-configured}"
+printf "  Frequency : %s MHz\n" "${MESHCORE_FREQ_MHZ:-configured}"
+printf "  Forwarding: %s\n"     "${MESHCORE_FORWARD_LABEL:-configured}"
 printf "  Symlink   : /dev/meshcore0\n"
 printf "  Config    : %s\n"     "$CONFIG_INI"
 echo ""
