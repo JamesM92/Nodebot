@@ -167,11 +167,15 @@ if lxmf_available:
     print("`_LXMF / Reticulum`_")
     print("lxmf:" + (lxmf_addr or "unavailable"))
     print("")
-for _sec, _port, _preset, _json in mesh_adapters:
-    _addr  = _mesh_addr_for(_json)
-    _label = "Meshtastic" if _sec == "meshtastic" else f"Meshtastic ({_sec})"
-    print(f"`_{_label}`_")
-    print(_addr + "  (" + _preset.replace("_", " ").title() + ")")
+if mesh_adapters:
+    print("`_Meshtastic`_")
+    for _sec, _port, _preset, _json in mesh_adapters:
+        _addr         = _mesh_addr_for(_json)
+        _preset_label = _preset.replace("_", " ").title()
+        if len(mesh_adapters) > 1:
+            print(f"{_preset_label}:  {_addr}")
+        else:
+            print(f"{_addr}  ({_preset_label})")
     print("")
 if mc_addr is not None:
     print("`_MeshCore`_")
