@@ -217,6 +217,8 @@ class MeshtasticAdapter:
                     time.sleep(delay)
 
     def _on_disconnect(self, interface, topic=None):
+        if interface is not self._iface:
+            return
         print("[meshtastic_adapter] connection lost")
         try:
             if interface is not None:
@@ -324,6 +326,9 @@ class MeshtasticAdapter:
     # =====================================================
 
     def _on_receive(self, packet, interface):
+
+        if interface is not self._iface:
+            return
 
         try:
             decoded = packet.get("decoded", {})
