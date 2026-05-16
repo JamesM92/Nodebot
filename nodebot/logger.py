@@ -195,12 +195,34 @@ def log_channel(proto, addr, text, chan=None, long_name=None, short_name=None, h
         return
     # If proto already contains a slash (e.g. "meshcore/Public"), use it directly
     tag = proto if ("/" in proto or chan is None) else f"{proto}/chan{chan}"
+
+    # Normalise address to lowercase
+    addr = addr.lower() if addr else addr
+
+    # Drop names that are just the address repeated (e.g. meshcore sending hex addr as name)
+    addr_stripped = addr.lstrip("!").lower()
+    if long_name and long_name.lower().lstrip("!") == addr_stripped:
+        long_name = None
+    if short_name and short_name.lower().lstrip("!") == addr_stripped:
+        short_name = None
+    # Drop short_name if it duplicates long_name
+    if short_name and long_name and short_name.lower() == long_name.lower():
+        short_name = None
+
     line = f"{_ts()} [{tag}] <{addr}>"
-    names = " | ".join(n for n in [long_name, short_name] if n)
-    if names:
-        line += f" ({names})"
+
+    # Name section: "LongName (ShortName)" — no pipes inside parens
+    if long_name and short_name:
+        line += f" {long_name} ({short_name})"
+    elif long_name:
+        line += f" {long_name}"
+    elif short_name:
+        line += f" ({short_name})"
+
+    # Hops as compact "+N" suffix before the message separator
     if hops is not None:
-        line += f" ({hops} hops)"
+        line += f" +{hops}"
+
     line += f" | {text}"
     _write(_channel_path, line)
 
