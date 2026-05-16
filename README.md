@@ -81,7 +81,7 @@ Each transport has its own installer. Run them after `install_nodebot.sh`. You c
 bash installer/install_lxmf.sh
 ```
 
-Connects NodeBot to a LoRa rNode flashed with Reticulum firmware and the NomadNet mesh network.
+Connects NodeBot to a LoRa rNode flashed with Reticulum firmware and the NomadNet mesh network. Also deploys a NomadNet page (`/page/nodebot/activity.mu`) that shows the last 50 public channel messages and last 50 unique node announces, readable from any NomadNet client on the network.
 
 ### MeshCore
 
@@ -225,6 +225,31 @@ If LXMF is installed, NomadNet has its own log stream:
 journalctl -u nomadnet -f
 ```
 
+### Traffic logs
+
+NodeBot can write append-only log files for channel messages, direct messages, and node announces. Configure them in `config.ini`:
+
+```ini
+[logging]
+channel_log  = ~/.nodebot/logs/channel.log   # public channel messages (all transports)
+dm_log       = ~/.nodebot/logs/dm.log         # direct messages received
+announce_log = ~/.nodebot/logs/announce.log   # node announces (legacy text format)
+announce_db  = ~/.nodebot/logs/announces.db   # node announces (SQLite — preferred)
+max_log_mb   = 50                             # trim log files above this size (0 = disabled)
+```
+
+Channel log format:
+```
+2026-05-15 18:31:04 [meshtastic:MF] <ab12cd34> Long Name (Short) +2 | message text
+```
+
+DM log format:
+```
+2026-05-15 18:32:10 [meshtastic:MF/dm] <ab12cd34> Long Name | message text
+```
+
+The `announce_db` SQLite database stores one row per node announce, keyed by address, with nick, short name, GPS coordinates, RSSI, SNR, hops, battery, and modem preset. The NomadNet activity feed page (deployed by `install_lxmf.sh`) reads this database directly to render a live node list.
+
 ### MeshCore public channel traffic
 
 `chanlisten` lets you watch MeshCore public channel messages from the terminal without joining the mesh yourself. It connects to NodeBot's internal channel buffer over a Unix socket.
@@ -262,6 +287,9 @@ Your device has a generic USB serial number (common on CP2102 clones — serial 
 
 **Meshtastic adapter keeps rebooting in a loop**
 NodeBot writes LoRa config on connect and saves the applied values to `~/.nodebot/lxmf_storage/meshtastic_lora.json`. On subsequent starts it compares the saved state and skips the write if nothing changed. If the loop persists, delete that file and NodeBot will rewrite it cleanly on next start.
+
+**MeshCore stops responding after unplugging and replugging**
+NodeBot detects the dropped connection and reconnects automatically with exponential backoff (up to 5 minutes). Watch the journal for `[meshcore_adapter] connection error` and `retrying in Xs` lines. If no retry messages appear, check that the `/dev/meshcore0` symlink still points to the correct port (`ls -la /dev/meshcore0`).
 
 **MeshCore or Meshtastic not responding to commands**
 Check that the correct port is set in `config.ini` and that NodeBot has permission to access it (`ls -la /dev/meshcore0 /dev/meshtastic0` — should be owned by `dialout` group; add your user with `sudo usermod -aG dialout $USER`).

@@ -44,6 +44,7 @@ def _init_announce_db(path):
             proto        TEXT    NOT NULL,
             addr         TEXT    NOT NULL,
             nick         TEXT,
+            short_name   TEXT,
             lat          REAL,
             lon          REAL,
             alt          REAL,
@@ -54,6 +55,12 @@ def _init_announce_db(path):
             modem_preset TEXT
         )
     """)
+    # Migrate existing DBs that predate the short_name column
+    try:
+        conn.execute("ALTER TABLE announces ADD COLUMN short_name TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_addr_ts ON announces (addr, ts DESC)")
     conn.commit()
     _announce_conn = conn
@@ -227,22 +234,26 @@ def log_channel(proto, addr, text, chan=None, long_name=None, short_name=None, h
     _write(_channel_path, line)
 
 
-def log_dm(proto, sender, text):
+def log_dm(proto, sender, text, nick=None):
     if not _dm_path:
         return
-    _write(_dm_path, f"{_ts()} [{proto}/dm] <{sender}> {text}")
+    line = f"{_ts()} [{proto}/dm] <{sender}>"
+    if nick:
+        line += f" {nick} |"
+    line += f" {text}"
+    _write(_dm_path, line)
 
 
-def log_announce(proto, addr, *, nick=None, lat=None, lon=None, alt=None,
+def log_announce(proto, addr, *, nick=None, short_name=None, lat=None, lon=None, alt=None,
                  rssi=None, snr=None, hops=None, battery=None, modem_preset=None):
     now = time.time()
-    sig = (nick, lat, lon, rssi, snr, hops, battery)
+    sig = (nick, short_name, lat, lon, rssi, snr, hops, battery)
 
     if _announce_conn is not None:
         try:
             with _lock:
                 row = _announce_conn.execute(
-                    "SELECT ts, nick, lat, lon, rssi, snr, hops, battery "
+                    "SELECT ts, nick, short_name, lat, lon, rssi, snr, hops, battery "
                     "FROM announces WHERE addr=? ORDER BY ts DESC LIMIT 1",
                     (addr,)
                 ).fetchone()
@@ -257,9 +268,9 @@ def log_announce(proto, addr, *, nick=None, lat=None, lon=None, alt=None,
                             return
                 _announce_conn.execute(
                     "INSERT INTO announces "
-                    "(ts, proto, addr, nick, lat, lon, alt, rssi, snr, hops, battery, modem_preset) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (now, proto, addr, nick, lat, lon, alt, rssi, snr, hops, battery, modem_preset)
+                    "(ts, proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (now, proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset)
                 )
                 # Keep last _ANNOUNCE_MAX_HIST rows per address
                 _announce_conn.execute("""

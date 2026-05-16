@@ -141,8 +141,8 @@ def fmt_channel_line(record, nick_table=None):
             addr = rest[1:end]
             rest = rest[end+1:].lstrip()
 
-    # shorten long hex addresses
-    addr_disp = ("…" + addr[-8:]) if len(addr) > 8 else addr
+    # shorten long hex addresses (LXMF 32-char); leave short ones intact
+    addr_disp = ("…" + addr[-12:]) if len(addr) > 12 else addr
 
     # (Long Name | Short Name) — optional
     names = ""
@@ -152,9 +152,9 @@ def fmt_channel_line(record, nick_table=None):
             names = rest[1:end]
             rest  = rest[end+1:].lstrip()
 
-    # (N hops) — optional
+    # +N hops — optional (logger writes "+2" before " | message")
     hops = ""
-    hops_m = re.match(r'\((\d+ hops)\)\s*', rest)
+    hops_m = re.match(r'\+(\d+)\s*', rest)
     if hops_m:
         hops = hops_m.group(1)
         rest = rest[hops_m.end():]
@@ -167,7 +167,7 @@ def fmt_channel_line(record, nick_table=None):
     tag_out   = f" `Ffa6[{tag}]`f" if tag else ""
     addr_out  = f" `F8cf<{addr_disp}>`f"
     names_out = f" `Faaa({names})`f" if names else ""
-    hops_out  = f" `F888({hops})`f" if hops else ""
+    hops_out  = f" `F888+{hops}`f" if hops else ""
     msg_out   = f" | {rest}"
 
     lines_out = [ts_out + tag_out + addr_out + names_out + hops_out + msg_out]
@@ -182,9 +182,10 @@ def fmt_channel_line(record, nick_table=None):
 # ── Announce helpers ──────────────────────────────────────────
 
 def _fmt_addr(addr):
-    """Shorten a hex address to last 8 chars if longer."""
-    if addr and len(addr) > 8 and all(c in "0123456789abcdefABCDEF" for c in addr):
-        return "…" + addr[-8:]
+    """Shorten long hex addresses (e.g. LXMF 32-char) to last 12 chars.
+    MeshCore 12-char and Meshtastic 8-char prefixes are shown in full."""
+    if addr and len(addr) > 12 and all(c in "0123456789abcdefABCDEF" for c in addr):
+        return "…" + addr[-12:]
     return addr or "?"
 
 
@@ -199,10 +200,10 @@ def _preset_tag(proto, modem_preset):
 def fmt_announce_row(row):
     """Format a SQLite announce row for Micron output.
 
-    Row columns: proto, addr, nick, lat, lon, alt, rssi, snr, hops, battery, modem_preset, last_ts
-    Output: timestamp  [proto:PRESET]  <addr_short> (nick)  | extras
+    Row columns: proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset, last_ts
+    Output: timestamp  [proto:PRESET]  <addr_short> (nick / short)  | extras
     """
-    proto, addr, nick, lat, lon, alt, rssi, snr, hops, battery, modem_preset, last_ts = row
+    proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset, last_ts = row
 
     import time as _time
     ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(last_ts))
@@ -210,8 +211,12 @@ def fmt_announce_row(row):
     tag     = _preset_tag(proto, modem_preset)
     addr_s  = _fmt_addr(addr)
     node_id = f"<{addr_s}>"
-    if nick:
+    if nick and short_name and nick.lower() != short_name.lower():
+        node_id += f" ({nick} / {short_name})"
+    elif nick:
         node_id += f" ({nick})"
+    elif short_name:
+        node_id += f" ({short_name})"
 
     extras = []
     if lat is not None and lon is not None:
@@ -251,6 +256,12 @@ def load_announces_from_db(db_path, limit):
                          ORDER BY n.ts DESC LIMIT 1),
                         nick
                     ) AS nick,
+                    COALESCE(
+                        (SELECT short_name FROM announces n
+                         WHERE n.addr = a.addr AND n.short_name IS NOT NULL
+                         ORDER BY n.ts DESC LIMIT 1),
+                        short_name
+                    ) AS short_name,
                     lat, lon, alt, rssi, snr, hops, battery,
                     modem_preset, MAX(ts) AS last_ts
                 FROM announces a

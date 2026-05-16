@@ -123,7 +123,7 @@ class MeshCoreAdapter:
             while self.running:
                 try:
                     cx = SerialConnection(self.port, self.baudrate)
-                    self._mc = MeshCore(cx, auto_reconnect=True, max_reconnect_attempts=0)
+                    self._mc = MeshCore(cx, auto_reconnect=False)
 
                     # Subscribe before connect so _on_self_info fires when
                     # send_appstart() triggers SELF_INFO during the handshake.
@@ -512,23 +512,27 @@ class MeshCoreAdapter:
     # ANNOUNCE LOGGING
     # =====================================================
 
-    def _maybe_log_contact_announce(self, sender_id, contact, rssi=None, snr=None):
+    def _maybe_log_contact_announce(self, sender_id, contact, rssi=None, snr=None, hops=None):
         """Log to announce log when a contact is first seen, or position/name changes."""
         if not sender_id:
             return
+        # Normalize to 8-char prefix for consistent DB keys regardless of
+        # whether sender_id came from an advertisement (pub[:8]) or a contact
+        # message payload (pubkey_prefix may be longer).
+        log_id = sender_id[:12]
         nick = contact.get("adv_name") if contact else None
         lat  = contact.get("lat")  if contact else None
         lon  = contact.get("lon")  if contact else None
         alt  = contact.get("alt")  if contact else None
         pos_key = (round(lat, 3) if lat else None, round(lon, 3) if lon else None)
-        prev = self._seen_contacts.get(sender_id)
+        prev = self._seen_contacts.get(log_id)
         prev_nick = prev[0] if prev else None
         prev_pos  = prev[1] if prev else None
         if prev_pos == pos_key and prev_nick == nick:
             return
-        self._seen_contacts[sender_id] = (nick, pos_key)
-        logger.log_announce("meshcore", sender_id, nick=nick, lat=lat, lon=lon, alt=alt,
-                            rssi=rssi, snr=snr)
+        self._seen_contacts[log_id] = (nick, pos_key)
+        logger.log_announce("meshcore", log_id, nick=nick, lat=lat, lon=lon, alt=alt,
+                            rssi=rssi, snr=snr, hops=hops)
 
     async def _on_advertisement(self, event):
         """Handle incoming advertisement (node announce broadcast)."""
@@ -536,7 +540,7 @@ class MeshCoreAdapter:
             pub = event.payload.get("public_key", "")
             if not pub:
                 return
-            prefix = pub[:8].lower()
+            prefix = pub[:12].lower()
             contact = self._mc.get_contact_by_key_prefix(prefix) if self._mc else None
             self._maybe_log_contact_announce(prefix, contact)
         except Exception as e:
@@ -548,7 +552,7 @@ class MeshCoreAdapter:
             pub = event.payload.get("public_key", "")
             if not pub:
                 return
-            prefix = pub[:8].lower()
+            prefix = pub[:12].lower()
             contact = self._mc.get_contact_by_key_prefix(prefix) if self._mc else None
             self._maybe_log_contact_announce(prefix, contact)
         except Exception as e:
@@ -579,12 +583,13 @@ class MeshCoreAdapter:
                 return
             self._recent_msgs[dedup_key] = now_ts
 
-            print(f"[meshcore_adapter] msg from {pubkey_prefix}: {text!r}")
-            logger.log_dm("meshcore", pubkey_prefix, text)
-
             contact = self._mc.get_contact_by_key_prefix(pubkey_prefix) if self._mc else None
-            self._maybe_log_contact_announce(pubkey_prefix, contact)
             nick = contact.get("adv_name") if contact else None
+
+            print(f"[meshcore_adapter] msg from {pubkey_prefix}: {text!r}")
+            logger.log_dm("meshcore", pubkey_prefix, text, nick=nick)
+
+            self._maybe_log_contact_announce(pubkey_prefix, contact)
 
             if self.engine:
                 loop = asyncio.get_event_loop()
@@ -659,7 +664,7 @@ class MeshCoreAdapter:
             rssi = payload.get("RSSI")
             snr  = payload.get("SNR")
             hops = payload.get("hops_away")
-            self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr)
+            self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr, hops=hops)
             self._dispatch_channel_entry(chan_idx, sender_name or sender_id or "unknown",
                                          text, rssi, snr, sender_id=sender_id, hops=hops,
                                          text_name=text_name)
@@ -747,7 +752,7 @@ class MeshCoreAdapter:
             rssi = p.get("rssi")
             snr  = p.get("snr")
             hops = p.get("hops_away")
-            self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr)
+            self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr, hops=hops)
             self._dispatch_channel_entry(chan_idx, sender_name, text, rssi, snr,
                                          via="rflog", sender_id=sender_id, hops=hops,
                                          text_name=text_name)
