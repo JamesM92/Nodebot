@@ -237,12 +237,15 @@ class MeshtasticAdapter:
         # LoRa radio settings (skipped if region is blank or already applied)
         self._apply_lora_config()
 
+        # Set node name and announce (skipped if name already matches saved state).
+        # Must run before the unconditional _save_lora_state below, otherwise
+        # _save_lora_state writes node_name to the file first and announce()
+        # sees it as already applied, causing setOwner to be permanently skipped.
+        self.announce()
+
         # Always persist node num — _apply_lora_config skips the save when
         # settings are unchanged, so my_node_num would never be written.
         self._save_lora_state()
-
-        # Set node name and announce (skipped if name already matches saved state)
-        self.announce()
 
         # Initial GPS push
         self._push_gps(force=True)
