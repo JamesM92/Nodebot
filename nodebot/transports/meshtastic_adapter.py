@@ -1,5 +1,4 @@
 import configparser
-import glob
 import json
 import os
 import subprocess
