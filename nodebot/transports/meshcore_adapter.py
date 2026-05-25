@@ -9,7 +9,7 @@ import time
 from .. import logger
 
 
-CHAN_SOCK_PATH = "/tmp/nodebot_chan.sock"
+CHAN_SOCK_PATH = "/tmp/nodebot_chan.sock"  # nosec B108 — Unix socket, not a temp file
 CHAN_BUFFER_MAX = 500
 
 

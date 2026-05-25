@@ -144,29 +144,43 @@ def fmt_channel_line(record, nick_table=None):
     # shorten long hex addresses (LXMF 32-char); leave short ones intact
     addr_disp = ("…" + addr[-12:]) if len(addr) > 12 else addr
 
-    # (Long Name | Short Name) — optional
-    names = ""
-    if rest.startswith("(") and "hops)" not in rest.split("(")[1].split(")")[0]:
-        end = rest.find(")")
-        if end != -1:
-            names = rest[1:end]
-            rest  = rest[end+1:].lstrip()
+    # Split on " | " to separate the meta prefix (name, hops) from the message body.
+    # Everything after the first " | " is the message; everything before is parsed for
+    # optional name and hop count.
+    if " | " in rest:
+        meta, rest = rest.split(" | ", 1)
+    else:
+        meta, rest = rest, ""
 
-    # +N hops — optional (logger writes "+2" before " | message")
+    # meta may be: ""  /  "Name"  /  "Name (Short)"  /  "Name +N"  /  "(Short) +N"  etc.
+    # Extract optional parenthesised short-name from the END of meta first.
+    short_name = ""
+    short_m = re.search(r'\(([^)]+)\)\s*$', meta)
+    if short_m:
+        short_name = short_m.group(1)
+        meta = meta[:short_m.start()].rstrip()
+
+    # Extract optional "+N" hops from the END of what remains.
     hops = ""
-    hops_m = re.match(r'\+(\d+)\s*', rest)
+    hops_m = re.search(r'\+(\d+)\s*$', meta)
     if hops_m:
         hops = hops_m.group(1)
-        rest = rest[hops_m.end():]
+        meta = meta[:hops_m.start()].rstrip()
 
-    # | message
-    if rest.startswith("| "):
-        rest = rest[2:]
+    # Whatever is left is the long name (may be empty).
+    long_name = meta.strip()
 
     ts_out    = f"`F888`!{ts}`f"
     tag_out   = f" `Ffa6[{tag}]`f" if tag else ""
     addr_out  = f" `F8cf<{addr_disp}>`f"
-    names_out = f" `Faaa({names})`f" if names else ""
+    if long_name and short_name:
+        names_out = f" `Faaa{long_name} ({short_name})`f"
+    elif long_name:
+        names_out = f" `Faaa{long_name}`f"
+    elif short_name:
+        names_out = f" `Faaa({short_name})`f"
+    else:
+        names_out = ""
     hops_out  = f" `F888+{hops}`f" if hops else ""
     msg_out   = f" | {rest}"
 
