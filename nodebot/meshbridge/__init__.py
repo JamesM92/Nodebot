@@ -1,1 +1,1 @@
-from .engine import NodeBot
+from .engine import NodeBot as NodeBot

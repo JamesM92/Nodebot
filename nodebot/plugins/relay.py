@@ -5,7 +5,7 @@ import configparser
 import json
 import os
 import time
-from ..commands import register, BOT_INSTANCE, is_admin
+from ..commands import register, BOT_INSTANCE
 
 # =====================================================
 # PERSISTENCE

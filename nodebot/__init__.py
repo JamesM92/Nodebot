@@ -1,3 +1,3 @@
 __version__ = "0.3.1"
 
-from .bot import NodeBot
+from .bot import NodeBot as NodeBot

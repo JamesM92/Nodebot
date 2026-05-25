@@ -241,7 +241,7 @@ class MeshCoreAdapter:
                 info = self._mc.self_info if self._mc else {}
             pubkey = info.get("public_key", "") if info else ""
             if not pubkey:
-                print(f"[meshcore_adapter] public_key not available in self_info")
+                print("[meshcore_adapter] public_key not available in self_info")
                 return
             import json as _json
             path = os.path.join(self.storage_path, "meshcore_node.json")
@@ -652,6 +652,10 @@ class MeshCoreAdapter:
                 contact = self._mc.get_contact_by_key_prefix(sender_id)
                 if contact:
                     sender_name = contact.get("adv_name") or sender_id
+                    # Upgrade short text-embedded prefix to full 12-char pubkey
+                    full_key = contact.get("public_key", "")
+                    if full_key:
+                        sender_id = full_key[:12].lower()
 
             # Fallback: if contact lookup failed, try to extract "Name: message"
             # from the text body (standard MeshCore convention).
@@ -686,7 +690,35 @@ class MeshCoreAdapter:
         """
         try:
             p = event.payload
-            if p.get("payload_typename") != "GRP_TXT":
+            typename = p.get("payload_typename")
+
+            if typename == "ADVERT":
+                adv_key = p.get("adv_key", "")
+                if adv_key:
+                    prefix = adv_key[:12].lower()
+                    contact = self._mc.get_contact_by_key_prefix(prefix) if self._mc else None
+                    lat = p.get("adv_lat")
+                    lon = p.get("adv_lon")
+                    # Merge in contact's stored position if advert didn't carry one
+                    if lat is None and contact:
+                        lat = contact.get("lat")
+                        lon = contact.get("lon")
+                    # Synthesise a minimal contact-like dict so _maybe_log_contact_announce
+                    # gets the name even if the contact lookup missed.
+                    adv_contact = dict(contact) if contact else {}
+                    if p.get("adv_name"):
+                        adv_contact.setdefault("adv_name", p["adv_name"])
+                    if lat is not None:
+                        adv_contact["lat"] = lat
+                    if lon is not None:
+                        adv_contact["lon"] = lon
+                    rssi = p.get("rssi")
+                    snr  = p.get("snr")
+                    hops = p.get("hops_away")
+                    self._maybe_log_contact_announce(prefix, adv_contact, rssi=rssi, snr=snr, hops=hops)
+                return
+
+            if typename != "GRP_TXT":
                 return
 
             chan_hash = p.get("chan_hash", "?")
@@ -740,6 +772,10 @@ class MeshCoreAdapter:
                     contact = self._mc.get_contact_by_key_prefix(sender_id)
                     if contact:
                         sender_name = contact.get("adv_name") or sender_id
+                        # Upgrade short text-embedded prefix to full 12-char pubkey
+                        full_key = contact.get("public_key", "")
+                        if full_key:
+                            sender_id = full_key[:12].lower()
 
             # Fallback: extract "Name: message" from text when contact lookup failed
             text_name = None
