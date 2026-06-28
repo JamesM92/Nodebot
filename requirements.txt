@@ -1,6 +1,6 @@
 appdirs>=1.4.4
 lxmf>=0.9.4
-meshtastic>=2.3
+meshtastic>=2.7.9
 pyserial>=3.5
 rns>=1.1.4
 # NomadNet provides the RNS shared instance NodeBot connects to.
