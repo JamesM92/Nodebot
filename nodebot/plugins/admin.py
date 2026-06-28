@@ -226,3 +226,63 @@ def allowlist_cmd(args, sender):
         return "Allowlist:\n" + "\n".join(sorted(bot.allowlist)), True
 
     return "Usage: allowlist on|off|add <addr>|remove <addr>|list", True
+
+
+@register(
+    "meshping",
+    "DM recent MeshCore contacts (use when a client can't reach NodeBot)",
+    category="admin",
+    admin=True,
+    cooldown=60
+)
+def meshping_cmd(args, sender):
+    import time as _time
+
+    bot = BOT_INSTANCE
+    if not bot:
+        return "Bot not initialized.", True
+
+    adapter = None
+    for name, a in (bot.transports.items() if bot.transports else []):
+        if "meshcore" in name.lower():
+            adapter = a
+            break
+
+    if not adapter:
+        return "No MeshCore adapter found.", True
+
+    mc = getattr(adapter, "_mc", None)
+    if not mc:
+        return "MeshCore not connected.", True
+
+    contacts = getattr(mc, "contacts", []) or []
+    if not contacts:
+        return "No MeshCore contacts found.", True
+
+    # Parse optional limit: meshping [limit] [message...]
+    limit = 20
+    words = list(args)
+    if words and words[0].isdigit():
+        limit = min(int(words.pop(0)), 50)
+
+    msg = (" ".join(words) if words
+           else "NodeBot is online. If you are having trouble messaging me,"
+                " please remove and re-add me from my latest announcement.")
+
+    targets = [c for c in contacts if c.get("public_key")][:limit]
+
+    sent = 0
+    failed = 0
+    for contact in targets:
+        prefix = contact["public_key"][:12].lower()
+        try:
+            adapter._send_reply(prefix, msg)
+            sent += 1
+            _time.sleep(0.5)
+        except Exception:
+            failed += 1
+
+    result = f"Pinged {sent} MeshCore contact(s) (of {len(contacts)} total)."
+    if failed:
+        result += f" {failed} failed."
+    return result, True

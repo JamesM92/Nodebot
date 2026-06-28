@@ -248,6 +248,7 @@ class MeshCoreAdapter:
             os.makedirs(self.storage_path, exist_ok=True)
             with open(path, "w") as f:
                 _json.dump({"public_key": pubkey}, f)
+            print(f"[meshcore_adapter] node pubkey: {pubkey}")
             print(f"[meshcore_adapter] node info saved: mc:{pubkey[:8]}")
         except Exception as e:
             print(f"[meshcore_adapter] could not save node info: {e}")
@@ -716,6 +717,9 @@ class MeshCoreAdapter:
                     snr  = p.get("snr")
                     hops = p.get("hops_away")
                     self._maybe_log_contact_announce(prefix, adv_contact, rssi=rssi, snr=snr, hops=hops)
+                return
+
+            if typename == "TEXT_MSG":
                 return
 
             if typename != "GRP_TXT":
