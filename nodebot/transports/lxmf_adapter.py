@@ -172,6 +172,14 @@ class LXMFAdapter:
                 RNS.LOG_NOTICE
             )
 
+            try:
+                import json as _json
+                _addr_path = os.path.join(self.storage_path, "lxmf_addr.json")
+                with open(_addr_path, "w") as _f:
+                    _json.dump({"lxmf_addr": self.delivery_destination.hash.hex()}, _f)
+            except Exception:
+                pass
+
             # Register an RNS announce handler so we log nodes that announce
             # themselves even if they never send a message.
             adapter = self
