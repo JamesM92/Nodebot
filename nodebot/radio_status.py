@@ -12,6 +12,9 @@ _storage = os.path.expanduser(_cfg.get("bot", "storage_path", fallback="~/.nodeb
 STATUS_FILE = os.path.join(_storage, "radio_status.json")
 
 
+_MAX_EVENTS = 10
+
+
 def update(name, status, error=None):
     """Write adapter status to radio_status.json. status: connected|disconnected|error"""
     try:
@@ -21,9 +24,17 @@ def update(name, status, error=None):
                 existing = json.load(f)
         except Exception:
             pass
-        entry = {"status": status, "updated": int(time.time())}
+        now = int(time.time())
+        prev = existing.get(name, {})
+        entry = {"status": status, "updated": now}
         if error:
             entry["error"] = str(error)[:200]
+        # Append to event history only when the status actually changes
+        events = list(prev.get("events", []))
+        if prev.get("status") != status:
+            events.append({"status": status, "ts": now})
+            events = events[-_MAX_EVENTS:]
+        entry["events"] = events
         existing[name] = entry
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
         with open(STATUS_FILE, "w") as f:

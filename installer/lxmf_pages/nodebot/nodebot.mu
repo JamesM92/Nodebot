@@ -182,6 +182,7 @@ if mc_addr is not None:
     print(mc_addr)
     print("")
 print("`Fbbf`[Activity Feed`:/page/nodebot/activity.mu`]`f")
+print("`Fbbf`[System Diagnostics`:/page/nodebot/diag.mu`]`f")
 print("")
 
 if os.path.isfile(README_PATH):
