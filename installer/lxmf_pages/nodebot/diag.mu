@@ -10,9 +10,15 @@ import subprocess
 import time
 import configparser
 import re
+import glob
+import datetime
 
 PROJECT_DIR = "PROJECT_DIR_PLACEHOLDER"
 CONFIG_PATH = os.path.join(PROJECT_DIR, "config.ini")
+RNS_CONFIG  = os.path.expanduser("~/.reticulum/config")
+RNSTATUS    = os.path.join(PROJECT_DIR, ".venv/bin/rnstatus")
+if not os.path.isfile(RNSTATUS):
+    RNSTATUS = "rnstatus"
 
 config = configparser.ConfigParser()
 config.read(CONFIG_PATH)
@@ -32,19 +38,15 @@ def _age(ts):
     if delta < 60:
         return f"{delta}s ago"
     if delta < 3600:
-        m = delta // 60
-        s = delta % 60
+        m, s = divmod(delta, 60)
         return f"{m}m {s}s ago"
     if delta < 86400:
-        h = delta // 3600
-        m = (delta % 3600) // 60
-        return f"{h}h {m}m ago"
-    d = delta // 86400
-    h = (delta % 86400) // 3600
-    return f"{d}d {h}h ago"
+        h, rem = divmod(delta, 3600)
+        return f"{h}h {rem // 60}m ago"
+    d, rem = divmod(delta, 86400)
+    return f"{d}d {rem // 3600}h ago"
 
 def _dur(ts):
-    """Elapsed time since ts, without 'ago'."""
     return _age(ts).replace(" ago", "")
 
 def _fmt_ts(ts):
@@ -80,13 +82,9 @@ def _sys_stats():
             secs = float(f.read().split()[0])
         d, rem = divmod(int(secs), 86400)
         h, rem = divmod(rem, 3600)
-        m = rem // 60
-        if d:
-            stats["uptime"] = f"{d}d {h}h {m}m"
-        elif h:
-            stats["uptime"] = f"{h}h {m}m"
-        else:
-            stats["uptime"] = f"{m}m"
+        stats["uptime"] = (f"{d}d {h}h {rem // 60}m" if d else
+                           f"{h}h {rem // 60}m"       if h else
+                           f"{rem // 60}m")
     except Exception:
         pass
     try:
@@ -95,8 +93,7 @@ def _sys_stats():
         total = int(re.search(r"MemTotal:\s+(\d+)", raw).group(1))
         avail = int(re.search(r"MemAvailable:\s+(\d+)", raw).group(1))
         used  = total - avail
-        pct   = 100 * used // total
-        stats["memory"] = f"{used // 1024} MB / {total // 1024} MB  ({pct}%)"
+        stats["memory"] = f"{used // 1024} MB / {total // 1024} MB  ({100 * used // total}%)"
     except Exception:
         pass
     try:
@@ -118,57 +115,133 @@ def _sys_stats():
         pass
     return stats
 
-def _tty_devices():
-    """Return list of (symlink_name, real_dev) for configured radio ports,
-    plus any unclaimed /dev/tty* devices."""
+def _rns_ports():
+    """Return {iface_name: port_path} from ~/.reticulum/config for RNS-managed serial devices."""
+    ports = {}
+    try:
+        with open(RNS_CONFIG) as f:
+            lines = f.readlines()
+        current = None
+        for line in lines:
+            stripped = line.strip()
+            m = re.match(r'^\[\[(.+)\]\]', stripped)
+            if m:
+                current = m.group(1)
+            elif current and re.match(r'^port\s*=', stripped):
+                port = stripped.split("=", 1)[1].strip()
+                if port:
+                    ports[current] = port
+    except Exception:
+        pass
+    return ports
+
+def _parse_rnstatus():
+    """Run rnstatus and parse output into a list of interface dicts."""
+    try:
+        r = subprocess.run([RNSTATUS], capture_output=True, text=True, timeout=10)
+        text = r.stdout
+    except Exception:
+        return None, None
+
+    interfaces = []
+    rns_uptime = None
+    current  = None
+    prev_key = None
+
+    for line in text.splitlines():
+        # Footer: " Uptime is ..."
+        m = re.match(r'^\s+Uptime is (.+)$', line)
+        if m:
+            rns_uptime = m.group(1).strip()
+            continue
+
+        # Block header: " TypeName[Name/detail]"
+        m = re.match(r'^\s+([A-Za-z ]+)\[(.+)\]', line)
+        if m:
+            if current is not None:
+                interfaces.append(current)
+            current  = {"type": m.group(1).strip(), "name": m.group(2).strip(), "props": {}}
+            prev_key = None
+            continue
+
+        if current is not None:
+            # Key : Value line
+            m = re.match(r'^\s{4,}([A-Za-z /.()\d]+?)\s*:\s*(.+)$', line)
+            if m:
+                key = m.group(1).strip()
+                val = m.group(2).strip()
+                current["props"][key] = val
+                prev_key = key
+                continue
+
+            # Continuation line (indented value with no key, e.g. the RX traffic row)
+            cont = re.match(r'^\s{16,}(\S.*)$', line)
+            if cont and prev_key:
+                current["props"][prev_key + " cont"] = cont.group(1).strip()
+
+    if current is not None:
+        interfaces.append(current)
+
+    return interfaces, rns_uptime
+
+def _tty_devices(rns_ports):
+    """Return (configured_dict, unclaimed_list).
+    configured_dict: {symlink_basename: (label, link_path, real_dev)}
+    Covers both NodeBot config.ini and RNS ~/.reticulum/config ports.
+    """
     configured = {}
+    claimed_reals = set()
+
+    # NodeBot adapters
     for sec in config.sections():
         port = config.get(sec, "port", fallback="").strip()
         if port and os.path.exists(port):
-            try:
-                real = os.path.realpath(port)
-                configured[os.path.basename(port)] = (sec, port, real)
-            except Exception:
-                configured[os.path.basename(port)] = (sec, port, port)
+            real = os.path.realpath(port)
+            configured[os.path.basename(port)] = (_radio_label(sec), port, real)
+            claimed_reals.add(real)
 
-    # Also find any TTY devices not claimed by a configured adapter
+    # RNS-managed interfaces (RNode, etc.)
+    for iface_name, port in rns_ports.items():
+        if not os.path.exists(port):
+            continue
+        real = os.path.realpath(port)
+        if real not in claimed_reals:
+            configured[os.path.basename(port)] = (f"RNS ({iface_name})", port, real)
+            claimed_reals.add(real)
+
+    # Unclaimed
     unclaimed = []
-    import glob
     for dev in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
-        real = os.path.realpath(dev)
-        claimed = any(real == r for _, _, r in configured.values())
-        if not claimed:
+        if os.path.realpath(dev) not in claimed_reals:
             unclaimed.append(dev)
 
     return configured, unclaimed
 
-# ── Radio labels (config section → display name) ──────────────
-_RADIO_LABELS = {
-    "meshcore":    "MeshCore",
-    "lxmf":        "LXMF / RNS",
-}
+# ── Radio labels ──────────────────────────────────────────────
 
 def _radio_label(name):
-    if name in _RADIO_LABELS:
-        return _RADIO_LABELS[name]
+    if name == "meshcore":
+        return "MeshCore"
+    if name == "lxmf":
+        return "LXMF / RNS"
     if name.startswith("meshtastic"):
-        sec = name
-        preset = config.get(sec, "modem_preset", fallback="").strip().upper() if config.has_section(sec) else ""
+        preset = config.get(name, "modem_preset", fallback="").strip().upper() if config.has_section(name) else ""
         abbr   = {"LONG_FAST": "LF", "MEDIUM_FAST": "MF", "LONG_SLOW": "LS",
                   "MEDIUM_SLOW": "MS", "SHORT_FAST": "SF"}.get(preset, preset[:4] if preset else "")
-        suffix = f" ({abbr})" if abbr else ""
-        return f"Meshtastic{suffix}"
+        return f"Meshtastic ({abbr})" if abbr else "Meshtastic"
     return name
 
 def _status_color(status):
     return {"connected": "F4f6", "disconnected": "FF60", "error": "FF00"}.get(status, "F888")
 
 # ── Fetch all data ─────────────────────────────────────────────
-now_str   = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-radio_st  = _radio_status()
-svc       = _service_info()
-sys_stats = _sys_stats()
-cfg_devs, unclaimed = _tty_devices()
+now_str        = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+radio_st       = _radio_status()
+svc            = _service_info()
+sys_stats      = _sys_stats()
+rns_ports      = _rns_ports()
+rns_ifaces, rns_uptime = _parse_rnstatus()
+cfg_devs, unclaimed    = _tty_devices(rns_ports)
 
 p = print
 
@@ -186,44 +259,38 @@ p("")
 p(">NodeBot Service")
 p("")
 
-active    = svc.get("ActiveState", "unknown")
-sub       = svc.get("SubState",    "unknown")
-enter_ts  = svc.get("ActiveEnterTimestamp", "")
+active   = svc.get("ActiveState", "unknown")
+sub      = svc.get("SubState",    "unknown")
+enter_ts = svc.get("ActiveEnterTimestamp", "")
 
-svc_color = "F4f6" if active == "active" else "FF00"
-svc_sym   = "●" if active == "active" else "○"
-p(f"  `{svc_color}{svc_sym} nodebot.service  [{active} / {sub}]`f")
+svc_col = "F4f6" if active == "active" else "FF00"
+svc_sym = "●"    if active == "active" else "○"
+p(f"  `{svc_col}{svc_sym} nodebot.service  [{active} / {sub}]`f")
 
-if enter_ts and enter_ts != "n/a":
+if enter_ts and enter_ts not in ("n/a", ""):
     try:
-        # systemd format: "Sat 2026-07-05 18:53:11 EDT"
-        # Strip day-of-week and timezone for parsing
-        parts = enter_ts.split()
-        if len(parts) >= 4:
-            ts_str = " ".join(parts[1:3])  # "2026-07-05 18:53:11"
-            import datetime
-            dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-            epoch = dt.timestamp()
-            p(f"  `F888since {ts_str}  ({_dur(epoch)} up)`f")
+        parts  = enter_ts.split()
+        ts_str = " ".join(parts[1:3])
+        epoch  = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").timestamp()
+        p(f"  `F888since {ts_str}  ({_dur(epoch)} up)`f")
     except Exception:
         p(f"  `F888since {enter_ts}`f")
 
 p("")
 
 # ─────────────────────────────────────────────────────────────
-# Radio Status
+# Radio Status  (NodeBot adapter layer)
 # ─────────────────────────────────────────────────────────────
 p(">Radio Status")
 p("")
 
-# Canonical order: meshcore, meshtastic, meshtastic1, ..., lxmf
-_order = ["meshcore"] + sorted(
-    [k for k in radio_st if k.startswith("meshtastic")]
-) + ["lxmf"] + sorted(
-    [k for k in radio_st if k not in ("meshcore", "lxmf") and not k.startswith("meshtastic")]
-)
+_order = (["meshcore"]
+          + sorted(k for k in radio_st if k.startswith("meshtastic"))
+          + ["lxmf"]
+          + sorted(k for k in radio_st
+                   if k not in ("meshcore", "lxmf") and not k.startswith("meshtastic")))
 seen = set()
-ordered_radios = [k for k in _order if k in radio_st and k not in seen and not seen.add(k)]
+ordered_radios = [k for k in _order if k in radio_st and not (k in seen or seen.add(k))]
 
 if not ordered_radios:
     p("  `F888No radio status data yet — start NodeBot once to populate`f")
@@ -235,11 +302,10 @@ else:
         err    = entry.get("error", "")
         events = entry.get("events", [])
 
-        label  = _radio_label(radio_name)
         col    = _status_color(status)
         sym    = "●" if status == "connected" else ("○" if status == "disconnected" else "!")
+        label  = _radio_label(radio_name)
 
-        # Port from config
         port_str = ""
         if config.has_section(radio_name):
             port = config.get(radio_name, "port", fallback="").strip()
@@ -256,9 +322,85 @@ else:
             for ev in reversed(events):
                 ev_col = _status_color(ev.get("status", ""))
                 ev_sym = "●" if ev.get("status") == "connected" else "○"
-                ev_ts  = _fmt_ts(ev.get("ts", 0))
-                ev_age = _age(ev.get("ts", 0))
-                p(f"    `F888{ev_ts}`f  `{ev_col}{ev_sym} {ev.get('status','?')}`f  `F888({ev_age})`f")
+                p(f"    `F888{_fmt_ts(ev.get('ts', 0))}`f  "
+                  f"`{ev_col}{ev_sym} {ev.get('status','?')}`f  "
+                  f"`F888({_age(ev.get('ts', 0))})`f")
+        p("")
+
+# ─────────────────────────────────────────────────────────────
+# RNS Interfaces  (RNode radio + TCP links)
+# ─────────────────────────────────────────────────────────────
+p(">RNS Interfaces")
+p("")
+
+if rns_ifaces is None:
+    p("  `F888rnstatus unavailable`f")
+else:
+    if rns_uptime:
+        p(f"  `F888RNS uptime: {rns_uptime}`f")
+        p("")
+
+    for iface in rns_ifaces:
+        itype = iface["type"]
+        name  = iface["name"]
+        props = iface["props"]
+
+        # Skip the shared instance — it's internal bookkeeping, not a radio
+        if "Shared Instance" in itype:
+            continue
+
+        status_val = props.get("Status", "?")
+        col = "F4f6" if status_val.lower() == "up" else "FF00"
+        sym = "●"    if status_val.lower() == "up" else "○"
+
+        # Friendly type tag
+        if "RNode" in itype:
+            type_tag = "RNode"
+        elif "TCP" in itype:
+            type_tag = "TCP"
+        elif "UDP" in itype:
+            type_tag = "UDP"
+        else:
+            type_tag = itype
+
+        p(f"  `{col}{sym} {name}`f  `F888[{type_tag}]`f")
+        p(f"  `F888status: `f`{col}{status_val}`f", end="")
+
+        mode = props.get("Mode")
+        rate = props.get("Rate")
+        if mode:
+            p(f"  `F888mode: {mode}`f", end="")
+        if rate:
+            p(f"  `F888rate: {rate}`f", end="")
+        p("")
+
+        # RNode-specific RF metrics
+        if "RNode" in itype:
+            port_for_iface = rns_ports.get(name, "")
+            if port_for_iface:
+                real_tty = os.path.basename(os.path.realpath(port_for_iface)) if os.path.exists(port_for_iface) else "?"
+                p(f"  `F888port: {port_for_iface} → {real_tty}`f")
+
+            for key, label in [
+                ("Noise Fl.",  "noise floor"),
+                ("Intrfrnc.",  "interference"),
+                ("Airtime",    "airtime"),
+                ("Ch. Load",   "ch. load"),
+                ("CPU temp",   "RNode temp"),
+                ("Battery",    "battery"),
+            ]:
+                val = props.get(key)
+                if val:
+                    p(f"  `F888{label:<14}`f  {val}")
+
+        # Traffic (values already contain ↑/↓ symbols from rnstatus)
+        tx = props.get("Traffic")
+        rx = props.get("Traffic cont")
+        if tx:
+            p(f"  `F888{'traffic':<14}`f  {tx}")
+        if rx:
+            p(f"  `F888{'':<14}`f  {rx}")
+
         p("")
 
 # ─────────────────────────────────────────────────────────────
@@ -268,9 +410,8 @@ p(">USB / TTY Devices")
 p("")
 
 if cfg_devs:
-    for sym_name, (sec, link, real) in sorted(cfg_devs.items()):
+    for sym_name, (label, link, real) in sorted(cfg_devs.items()):
         real_base = os.path.basename(real)
-        label     = _radio_label(sec)
         p(f"  `F4f6● `f`Ffa6{os.path.basename(link)}`f → `F888{real_base}`f  `Faaa({label})`f")
 else:
     p("  `F888No configured radio devices are currently present`f")
@@ -282,19 +423,13 @@ if unclaimed:
 p("")
 
 # ─────────────────────────────────────────────────────────────
-# System Info
+# System
 # ─────────────────────────────────────────────────────────────
 p(">System")
 p("")
 
-_labels = [
-    ("uptime",   "Pi uptime"),
-    ("cpu_temp", "CPU temp"),
-    ("memory",   "Memory"),
-    ("load",     "Load (1/5/15m)"),
-    ("disk",     "Disk (/)"),
-]
-for key, label in _labels:
+for key, label in [("uptime", "Pi uptime"), ("cpu_temp", "CPU temp"),
+                   ("memory", "Memory"), ("load", "Load (1/5/15m)"), ("disk", "Disk (/)")]:
     if key in sys_stats:
         p(f"  `F888{label:<14}`f  {sys_stats[key]}")
 
