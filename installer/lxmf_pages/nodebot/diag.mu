@@ -135,13 +135,53 @@ def _rns_ports():
         pass
     return ports
 
-def _parse_rnstatus():
-    """Run rnstatus and parse output into a list of interface dicts."""
+RNS_CACHE      = os.path.join(storage, "rns_status_cache.txt")
+RNS_CACHE_TTL  = 60  # seconds
+
+
+def _refresh_rns_cache():
+    """Run rnstatus in the background and write output to cache file."""
     try:
         r = subprocess.run([RNSTATUS], capture_output=True, text=True, timeout=10)
-        text = r.stdout
+        if r.returncode == 0 and r.stdout.strip():
+            with open(RNS_CACHE, "w") as f:
+                f.write(r.stdout)
     except Exception:
-        return None, None
+        pass
+
+
+def _parse_rnstatus():
+    """Read rnstatus from cache (refreshing in background if stale)."""
+    cache_age = None
+    text      = None
+
+    try:
+        mtime     = os.path.getmtime(RNS_CACHE)
+        cache_age = time.time() - mtime
+        if cache_age < RNS_CACHE_TTL:
+            with open(RNS_CACHE) as f:
+                text = f.read()
+    except Exception:
+        pass
+
+    if text is None:
+        # Cache missing or expired — run synchronously this one time
+        try:
+            r    = subprocess.run([RNSTATUS], capture_output=True, text=True, timeout=10)
+            text = r.stdout
+            if text.strip():
+                with open(RNS_CACHE, "w") as f:
+                    f.write(text)
+                cache_age = 0
+        except Exception:
+            return None, None, None
+    elif cache_age is not None and cache_age >= RNS_CACHE_TTL:
+        # Stale — kick off background refresh so next load is fast
+        import threading
+        threading.Thread(target=_refresh_rns_cache, daemon=True).start()
+
+    if not text:
+        return None, None, None
 
     interfaces = []
     rns_uptime = None
@@ -182,7 +222,7 @@ def _parse_rnstatus():
     if current is not None:
         interfaces.append(current)
 
-    return interfaces, rns_uptime
+    return interfaces, rns_uptime, cache_age
 
 def _tty_devices(rns_ports):
     """Return (configured_dict, unclaimed_list).
@@ -240,7 +280,7 @@ radio_st       = _radio_status()
 svc            = _service_info()
 sys_stats      = _sys_stats()
 rns_ports      = _rns_ports()
-rns_ifaces, rns_uptime = _parse_rnstatus()
+rns_ifaces, rns_uptime, rns_cache_age = _parse_rnstatus()
 cfg_devs, unclaimed    = _tty_devices(rns_ports)
 
 p = print
@@ -330,14 +370,15 @@ else:
 # ─────────────────────────────────────────────────────────────
 # RNS Interfaces  (RNode radio + TCP links)
 # ─────────────────────────────────────────────────────────────
-p(">RNS Interfaces")
+rns_age_str = (f"  `F888cached {int(rns_cache_age)}s ago`f" if rns_cache_age and rns_cache_age > 1 else "")
+p(f">RNS Interfaces{('  (live)' if not rns_age_str else '')}")
 p("")
 
 if rns_ifaces is None:
     p("  `F888rnstatus unavailable`f")
 else:
     if rns_uptime:
-        p(f"  `F888RNS uptime: {rns_uptime}`f")
+        p(f"  `F888RNS uptime: {rns_uptime}`f" + (f"  {rns_age_str}" if rns_age_str else ""))
         p("")
 
     for iface in rns_ifaces:
