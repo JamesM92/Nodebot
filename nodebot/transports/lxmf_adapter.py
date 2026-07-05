@@ -6,7 +6,7 @@ import time
 import RNS
 import LXMF
 
-from .. import logger
+from .. import logger, radio_status
 
 
 class LXMFAdapter:
@@ -55,6 +55,7 @@ class LXMFAdapter:
 
         self._load_identity()
         self._init_router()
+        radio_status.update("lxmf", "connected")
 
     # =====================================================
     # RNS INITIALIZATION
