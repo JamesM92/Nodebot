@@ -78,6 +78,7 @@ class MeshtasticAdapter:
         self._last_gps_lat  = None
         self._last_gps_lon  = None
         self._last_gps_alt  = None
+        self._last_periodic_announce = 0.0
 
         # Telemetry — shared [telemetry] section
         self._tel_mode     = cfg.get("telemetry", "mode",             fallback="disabled").strip()
@@ -679,7 +680,13 @@ class MeshtasticAdapter:
     # ANNOUNCE / STOP
     # =====================================================
 
+    _PERIODIC_ANNOUNCE_INTERVAL = 900  # 15 minutes — matches Meshtastic firmware default
+
     def announce(self):
+        now = time.time()
+        if now - self._last_periodic_announce < self._PERIODIC_ANNOUNCE_INTERVAL:
+            return
+        self._last_periodic_announce = now
         try:
             if not self._iface:
                 return

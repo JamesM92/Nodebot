@@ -311,13 +311,15 @@ class NodeBot:
 
     def announce_all(self):
         announced = []
-        for name, adapter in self.transports.items():
-            if hasattr(adapter, "announce"):
-                try:
-                    adapter.announce()
-                    announced.append(name)
-                except Exception as e:
-                    print(f"[engine] announce failed on {name}: {e}")
+        adapters = [(name, a) for name, a in self.transports.items() if hasattr(a, "announce")]
+        for i, (name, adapter) in enumerate(adapters):
+            try:
+                adapter.announce()
+                announced.append(name)
+            except Exception as e:
+                print(f"[engine] announce failed on {name}: {e}")
+            if i < len(adapters) - 1:
+                time.sleep(3)
         return announced
 
     def reload_plugins(self):

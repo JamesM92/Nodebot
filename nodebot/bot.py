@@ -140,7 +140,7 @@ class NodeBot:
     # =====================================================
 
     _HOUSEKEEPING_INTERVAL = 60    # session expiry check (seconds)
-    _ANNOUNCE_INTERVAL     = 600   # periodic re-announce (seconds)
+    _ANNOUNCE_INTERVAL     = 300   # periodic re-announce (seconds)
 
     def _main_loop(self):
 

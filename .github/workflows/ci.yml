@@ -30,3 +30,9 @@ jobs:
             -not -path "./.venv/*" \
             -not -path "./.git/*" \
             | xargs python -m py_compile
+
+      - name: Shell script syntax check
+        run: |
+          find . -name "*.sh" \
+            -not -path "./.git/*" \
+            | xargs -I{} bash -n {}

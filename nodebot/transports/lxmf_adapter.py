@@ -33,6 +33,7 @@ class LXMFAdapter:
         self._sources = {}
         # hex addresses already written to announce log this session
         self._announced_lxmf = set()
+        self._last_periodic_announce = 0.0
 
         _here = os.path.dirname(os.path.abspath(__file__))
         _config_path = os.path.join(_here, "..", "..", "config.ini")
@@ -171,6 +172,14 @@ class LXMFAdapter:
                 f"[lxmf_adapter] LXMF ready — bot address: {RNS.prettyhexrep(self.delivery_destination.hash)}",
                 RNS.LOG_NOTICE
             )
+
+            try:
+                import json as _json
+                _addr_path = os.path.join(self.storage_path, "lxmf_addr.json")
+                with open(_addr_path, "w") as _f:
+                    _json.dump({"lxmf_addr": self.delivery_destination.hash.hex()}, _f)
+            except Exception:
+                pass
 
             # Register an RNS announce handler so we log nodes that announce
             # themselves even if they never send a message.
@@ -334,17 +343,22 @@ class LXMFAdapter:
                 self._announced_lxmf.add(addr_hex)
                 logger.log_announce("lxmf", addr_hex)
 
+            app_data = RNS.Identity.recall_app_data(sender_hash)
+            nick = LXMF.display_name_from_app_data(app_data) if app_data else None
+
             RNS.log(
-                f"[lxmf_adapter] msg from {RNS.prettyhexrep(sender_hash)}: {content!r}",
+                f"[lxmf_adapter] msg from {RNS.prettyhexrep(sender_hash)}"
+                f"{' (' + nick + ')' if nick else ''}: {content!r}",
                 RNS.LOG_NOTICE
             )
-            logger.log_dm("lxmf", sender_hash.hex(), content)
+            logger.log_dm("lxmf", sender_hash.hex(), content, nick=nick)
 
             if self.engine:
                 self.engine.handle_message(
                     sender=sender_hash,
                     message=content,
-                    send_callback=self._send_reply
+                    send_callback=self._send_reply,
+                    nick=nick
                 )
 
         except Exception as e:
@@ -491,7 +505,13 @@ class LXMFAdapter:
     # ANNOUNCE
     # =====================================================
 
+    _PERIODIC_ANNOUNCE_INTERVAL = 3600  # 1 hour
+
     def announce(self):
+        now = time.time()
+        if now - self._last_periodic_announce < self._PERIODIC_ANNOUNCE_INTERVAL:
+            return
+        self._last_periodic_announce = now
         try:
             self.router.announce(self.delivery_destination.hash)
             RNS.log("[lxmf_adapter] announced on network", RNS.LOG_NOTICE)

@@ -44,6 +44,7 @@ class MeshCoreAdapter:
         self._recent_msgs = {}       # (pubkey_prefix, text) -> timestamp for DM dedup
         self._recent_chan_msgs = {}  # (sender_ts, text[:32]) -> timestamp for channel dedup
         self._seen_contacts = {}     # sender_id -> (rounded_lat, rounded_lon) for announce dedup
+        self._last_periodic_announce = 0.0
         self._chan_names = {}        # chan_idx -> channel name (populated by _query_channels)
 
         _here = os.path.dirname(os.path.abspath(__file__))
@@ -894,10 +895,16 @@ class MeshCoreAdapter:
     # ANNOUNCE
     # =====================================================
 
+    _PERIODIC_ANNOUNCE_INTERVAL = 43200  # 12 hours
+
     def announce(self):
         if not self._loop or not self._mc:
             print("[meshcore_adapter] not connected, cannot announce")
             return
+        now = time.time()
+        if now - self._last_periodic_announce < self._PERIODIC_ANNOUNCE_INTERVAL:
+            return
+        self._last_periodic_announce = now
         future = asyncio.run_coroutine_threadsafe(
             self._announce_async(),
             self._loop
