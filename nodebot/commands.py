@@ -190,7 +190,7 @@ def scan_plugins(force=False):
     present = {
         f"nodebot.plugins.{f[:-3]}"
         for f in files
-        if f.endswith(".py") and not f.startswith("__")
+        if f.endswith(".py") and not f.startswith("_")
     }
 
     # Unregister commands for any plugin whose file has been removed
@@ -209,7 +209,7 @@ def scan_plugins(force=False):
         if not file.endswith(".py"):
             continue
 
-        if file.startswith("__"):
+        if file.startswith("_"):
             continue
 
         module_name = f"nodebot.plugins.{file[:-3]}"

@@ -3,21 +3,6 @@ from ..commands import register, BOT_INSTANCE
 
 
 # -------------------------
-# Node Time
-# -------------------------
-
-@register(
-    "time",
-    "Show node time",
-    category="network",
-    cooldown=120   # ⬅ command-level cooldown (seconds)
-)
-def node_time(args):
-
-    return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-# -------------------------
 # Who Am I
 # -------------------------
 
