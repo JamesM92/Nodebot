@@ -475,5 +475,5 @@ for key, label in [("uptime", "Pi uptime"), ("cpu_temp", "CPU temp"),
 
 p("")
 p("`l")
-p("`Fbbf`[← Back to NodeBot`:/page/nodebot/nodebot.mu`]`f")
+p("`Fbbf`[← Back to NodeBot`:/page/nodebot/nodebot.mu`]`f  `F888|`f  `Fbbf`[← Main Page`:/page/weewx/weewx.mu`]`f")
 p("")
