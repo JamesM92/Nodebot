@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 from ..commands import register, BOT_INSTANCE
 from .. import __version__
 
@@ -52,3 +53,24 @@ def uptime(args):
 def version_cmd(args):
 
     return f"NodeBot v{__version__}"
+
+
+# -------------------------
+# Time
+# -------------------------
+
+@register(
+    "time",
+    "Current date and time",
+    category="tools",
+    cooldown=10
+)
+def time_cmd(args):
+
+    now_utc   = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone()
+    tz_name   = now_local.strftime("%Z")
+    return (
+        f"{now_local.strftime('%Y-%m-%d %H:%M')} {tz_name} "
+        f"({now_utc.strftime('%H:%M')} UTC)"
+    )

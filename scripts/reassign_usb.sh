@@ -56,6 +56,12 @@ INSTALLED=()
     PROTO_SYMLINK["meshtastic"]="meshtastic0"
     PROTO_LABEL["meshtastic"]="Meshtastic"
 }
+[[ -f /etc/udev/rules.d/99-meshtastic1.rules ]] && {
+    INSTALLED+=("meshtastic1")
+    PROTO_RULE["meshtastic1"]="/etc/udev/rules.d/99-meshtastic1.rules"
+    PROTO_SYMLINK["meshtastic1"]="meshtastic1"
+    PROTO_LABEL["meshtastic1"]="Meshtastic 1"
+}
 
 if (( ${#INSTALLED[@]} == 0 )); then
     echo "  No NodeBot protocol udev rules found — nothing to reassign."
@@ -267,7 +273,7 @@ for i in "${!PORTS[@]}"; do
                 fi
             fi
             ;;
-        meshtastic)
+        meshtastic|meshtastic1)
             if [[ -f "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import meshtastic" &>/dev/null 2>&1; then
                 result=$(timeout 35 "$VENV_PYTHON" -c "$MESHTASTIC_PROBE_PY" "$port" 2>/dev/null || echo "FAIL:probe error")
                 # If the probe timed out, toggle DTR to reset the device's serial
