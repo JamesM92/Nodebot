@@ -158,14 +158,13 @@ def _parse_rnstatus():
     try:
         mtime     = os.path.getmtime(RNS_CACHE)
         cache_age = time.time() - mtime
-        if cache_age < RNS_CACHE_TTL:
-            with open(RNS_CACHE) as f:
-                text = f.read()
+        with open(RNS_CACHE) as f:
+            text = f.read()
     except Exception:
         pass
 
     if text is None:
-        # Cache missing or expired — run synchronously this one time
+        # Cache file missing — run synchronously once to prime it
         try:
             r    = subprocess.run([RNSTATUS], capture_output=True, text=True, timeout=10)
             text = r.stdout
@@ -176,7 +175,7 @@ def _parse_rnstatus():
         except Exception:
             return None, None, None
     elif cache_age is not None and cache_age >= RNS_CACHE_TTL:
-        # Stale — kick off background refresh so next load is fast
+        # Cache exists but stale — serve it now, refresh in background
         import threading
         threading.Thread(target=_refresh_rns_cache, daemon=True).start()
 
