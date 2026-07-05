@@ -205,7 +205,7 @@ class MeshCoreAdapter:
                     break
 
                 except Exception as e:
-                    delay = min(10 * (2 ** _retry), 300)
+                    delay = min(10 * (2 ** _retry), 60)
                     _retry += 1
                     print(f"[meshcore_adapter] connection error: {e} — retrying in {delay}s")
                     radio_status.update("meshcore", "error", error=str(e))

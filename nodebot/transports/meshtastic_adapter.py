@@ -182,13 +182,13 @@ class MeshtasticAdapter:
                     pass
                 self._subscribed = False
 
-                delay = min(10 * (2 ** _retry), 300)
+                delay = min(10 * (2 ** _retry), 60)
                 _retry += 1
                 print(f"[meshtastic_adapter] disconnected — retrying in {delay}s")
                 time.sleep(delay)
 
             except Exception as e:
-                delay = min(10 * (2 ** _retry), 300)
+                delay = min(10 * (2 ** _retry), 60)
                 _retry += 1
                 print(f"[meshtastic_adapter] connection error: {e} — retrying in {delay}s")
                 radio_status.update(self.CONFIG_SECTION, "error", error=str(e))
