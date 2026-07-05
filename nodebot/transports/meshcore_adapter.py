@@ -6,7 +6,7 @@ import re
 import threading
 import time
 
-from .. import logger
+from .. import logger, radio_status
 
 
 CHAN_SOCK_PATH = "/tmp/nodebot_chan.sock"  # nosec B108 — Unix socket, not a temp file
@@ -161,6 +161,7 @@ class MeshCoreAdapter:
 
                     await self._mc.start_auto_message_fetching()
                     print("[meshcore_adapter] listening for messages")
+                    radio_status.update("meshcore", "connected")
 
                     if self.engine:
                         loop = asyncio.get_event_loop()
@@ -207,6 +208,7 @@ class MeshCoreAdapter:
                     delay = min(10 * (2 ** _retry), 300)
                     _retry += 1
                     print(f"[meshcore_adapter] connection error: {e} — retrying in {delay}s")
+                    radio_status.update("meshcore", "error", error=str(e))
                     self._mc = None
                     if self.running:
                         await asyncio.sleep(delay)

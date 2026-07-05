@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 
-from .. import logger
+from .. import logger, radio_status
 
 _PRESET_ABBR = {
     "LONG_FAST":      "LF",
@@ -67,6 +67,9 @@ class MeshtasticAdapter:
         self._lora_preset  = cfg.get(sec, "modem_preset", fallback="LONG_FAST").strip()
         self._lora_hops    = int(cfg.get(sec, "hop_limit",  fallback="3").strip())
         self._lora_power   = int(cfg.get(sec, "tx_power",   fallback="0").strip())
+
+        # Device config — role applied on connect if set
+        self._device_role  = cfg.get(sec, "role", fallback="").strip().upper()
 
         # GPS — shared [gps] section
         self._gps_mode      = cfg.get("gps", "gps_mode",      fallback="disabled").strip()
@@ -147,6 +150,7 @@ class MeshtasticAdapter:
 
                 # Configure node identity and GPS
                 self._configure_node()
+                radio_status.update(self.CONFIG_SECTION, "connected")
 
                 # Start background loops
                 if self._tel_mode != "disabled":
@@ -187,6 +191,7 @@ class MeshtasticAdapter:
                 delay = min(10 * (2 ** _retry), 300)
                 _retry += 1
                 print(f"[meshtastic_adapter] connection error: {e} — retrying in {delay}s")
+                radio_status.update(self.CONFIG_SECTION, "error", error=str(e))
                 for iface in (_iface_attempt, self._iface):
                     if iface is not None:
                         try:
@@ -220,6 +225,7 @@ class MeshtasticAdapter:
         if interface is not self._iface:
             return
         print("[meshtastic_adapter] connection lost")
+        radio_status.update(self.CONFIG_SECTION, "disconnected")
         try:
             if interface is not None:
                 interface.close()
@@ -236,6 +242,9 @@ class MeshtasticAdapter:
 
         # LoRa radio settings (skipped if region is blank or already applied)
         self._apply_lora_config()
+
+        # Device role (skipped if blank or already matches saved state)
+        self._apply_device_config()
 
         # Set node name and announce (skipped if name already matches saved state).
         # Must run before the unconditional _save_lora_state below, otherwise
@@ -277,6 +286,47 @@ class MeshtasticAdapter:
             print(f"[meshtastic_adapter] LoRa config: invalid value — {e}")
         except Exception as e:
             print(f"[meshtastic_adapter] LoRa config failed: {e}")
+
+    def _apply_device_config(self):
+        if not self._device_role:
+            return
+        if self._device_role_matches_saved():
+            print(f"[meshtastic_adapter] device role unchanged ({self._device_role}), skipping write")
+            return
+        try:
+            from meshtastic import config_pb2
+            device = self._iface.localNode.localConfig.device
+            device.role = config_pb2.Config.DeviceConfig.Role.Value(self._device_role)
+            self._iface.localNode.writeConfig("device")
+            self._save_device_state()
+            print(f"[meshtastic_adapter] device role set: {self._device_role}")
+        except (KeyError, ValueError) as e:
+            print(f"[meshtastic_adapter] device config: invalid role '{self._device_role}' — {e}")
+        except Exception as e:
+            print(f"[meshtastic_adapter] device config failed: {e}")
+
+    def _device_role_matches_saved(self):
+        try:
+            with open(self._lora_state_path()) as f:
+                saved = json.load(f)
+            return saved.get("role") == self._device_role
+        except Exception:
+            return False
+
+    def _save_device_state(self):
+        try:
+            os.makedirs(self.storage_path, exist_ok=True)
+            existing = {}
+            try:
+                with open(self._lora_state_path()) as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
+            existing["role"] = self._device_role
+            with open(self._lora_state_path(), "w") as f:
+                json.dump(existing, f)
+        except Exception as e:
+            print(f"[meshtastic_adapter] failed to save device state: {e}")
 
     def _lora_state_path(self):
         return os.path.join(self.storage_path, f"{self.CONFIG_SECTION}_lora.json")
