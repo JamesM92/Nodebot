@@ -42,7 +42,7 @@ class MeshCoreAdapter:
         self._chan_buffer = collections.deque(maxlen=CHAN_BUFFER_MAX)
         self._chan_clients = set()   # asyncio.StreamWriter instances
         self._recent_msgs = {}       # (pubkey_prefix, text) -> timestamp for DM dedup
-        self._recent_chan_msgs = {}  # (sender_ts, text[:32]) -> timestamp for channel dedup
+        self._recent_chan_msgs = {}  # (sender_ts, sender_id, text[:32]) -> timestamp for channel dedup
         self._seen_contacts = {}     # sender_id -> (rounded_lat, rounded_lon) for announce dedup
         self._last_periodic_announce = 0.0
         self._chan_names = {}        # chan_idx -> channel name (populated by _query_channels)
@@ -422,14 +422,34 @@ class MeshCoreAdapter:
         if found == 0:
             print("[meshcore_adapter] no channels configured on device")
 
+        # Clear duplicate channel entries (same name in multiple slots).
+        # This can happen when NodeBot restarts and rewrites a channel that was
+        # already configured — keep only the first occurrence, clear the rest.
+        seen_names = {}
+        for idx in range(1, 8):
+            name = self._chan_names.get(idx)
+            if not name:
+                continue
+            if name in seen_names:
+                print(f"[meshcore_adapter] clearing duplicate channel slot {idx} ({name!r}, already in slot {seen_names[name]})")
+                try:
+                    await self._mc.commands.set_channel(idx, "")
+                    del self._chan_names[idx]
+                except Exception as e:
+                    print(f"[meshcore_adapter] could not clear duplicate slot {idx}: {e}")
+            else:
+                seen_names[name] = idx
+
         # Configure any extra channels that are not already set on the device.
         # Slots are filled starting at index 1 (slot 0 is always "Public").
-        # A slot is only written when its current name is empty.
+        # Skip channels that are already configured in any slot to prevent
+        # duplicates accumulating across reconnects.
+        already_named = set(self._chan_names.values())
         slot = 1
         for ch_name in self._extra_channels:
-            if not ch_name:
+            if not ch_name or ch_name in already_named:
                 continue
-            # Skip slots that already have a name
+            # Find next empty slot
             while slot < 8 and self._chan_names.get(slot):
                 slot += 1
             if slot >= 8:
@@ -447,6 +467,7 @@ class MeshCoreAdapter:
                     print(f"[meshcore_adapter] channel {slot} confirmed: name={name2!r} hash={h2}")
                     if name2:
                         self._chan_names[slot] = name2
+                        already_named.add(name2)
             except Exception as e:
                 print(f"[meshcore_adapter] channel {slot} configure error: {e}")
             slot += 1
@@ -638,8 +659,11 @@ class MeshCoreAdapter:
                 sender_id = m.group(1).lower()
                 text = m.group(2).strip()
 
-            # Dedup across CHANNEL_MSG_RECV and RX_LOG_DATA paths
-            dedup_key = (sender_ts, text[:32])
+            # Dedup across CHANNEL_MSG_RECV and RX_LOG_DATA paths.
+            # Include sender_id so two different nodes sending the same short
+            # message within 60s don't suppress each other (especially when
+            # sender_ts=0 on nodes without time sync).
+            dedup_key = (sender_ts, sender_id or "", text[:32])
             now_ts = time.time()
             stale = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
             for k in stale:
@@ -753,8 +777,10 @@ class MeshCoreAdapter:
 
             sender_ts = p.get("sender_timestamp", 0)
 
-            # Dedup against messages already seen via CHANNEL_MSG_RECV
-            dedup_key = (sender_ts, text[:32])
+            # Dedup against messages already seen via CHANNEL_MSG_RECV.
+            # Include sender_id so nodes without time sync (sender_ts=0) don't
+            # suppress each other when they happen to send the same short text.
+            dedup_key = (sender_ts, sender_id or "", text[:32])
             now_ts = time.time()
             stale = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
             for k in stale:
