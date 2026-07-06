@@ -163,6 +163,7 @@ def md_to_micron(text):
     return "\n".join(out)
 
 # ── Output ────────────────────────────────────────────────────
+print("#!c=0")  # disable client-side caching so contact URLs always stay fresh
 print("`!" + bot_name + "`!")
 print("Multi-Protocol Mesh Network Node")
 print("`l")
@@ -184,18 +185,16 @@ if mesh_adapters:
         _preset_label = _preset.replace("_", " ").title()
         if len(mesh_adapters) > 1:
             print(f"{_preset_label}:  {_addr}")
-            if _contact_url:
-                print(f"`F888Add contact:`f  {_contact_url}")
         else:
             print(f"{_addr}  ({_preset_label})")
-            if _contact_url:
-                print(f"`F888Add contact:`f  {_contact_url}")
+        if _contact_url:
+            print(f"  `F0FD{_contact_url}`f")
     print("")
 if mc_addr is not None:
     print("`_MeshCore`_")
     print(mc_addr)
     if mc_contact_url:
-        print(f"`F888Add contact:`f  {mc_contact_url}")
+        print(f"  `F0FD{mc_contact_url}`f")
     print("")
 print("`Fbbf`[Activity Feed`:/page/nodebot/activity.mu`]`f")
 print("`Fbbf`[System Diagnostics`:/page/nodebot/diag.mu`]`f")
