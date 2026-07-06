@@ -188,13 +188,13 @@ if mesh_adapters:
         else:
             print(f"{_addr}  ({_preset_label})")
         if _contact_url:
-            print(f"  `F0FD{_contact_url}`f")
+            print(f"     `Fad8{_contact_url}`f")
     print("")
 if mc_addr is not None:
     print("`_MeshCore`_")
     print(mc_addr)
     if mc_contact_url:
-        print(f"  `F0FD{mc_contact_url}`f")
+        print(f"     `Fad8{mc_contact_url}`f")
     print("")
 print("`Fbbf`[Activity Feed`:/page/nodebot/activity.mu`]`f")
 print("`Fbbf`[System Diagnostics`:/page/nodebot/diag.mu`]`f")
