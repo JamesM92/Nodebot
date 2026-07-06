@@ -191,7 +191,6 @@ class MeshCoreAdapter:
                     _WATCHDOG_SECS  = 15 * 60
                     _last_poll      = asyncio.get_event_loop().time()
                     _last_ping      = asyncio.get_event_loop().time()
-                    _last_watchdog  = asyncio.get_event_loop().time()
                     _ping_failures  = 0
                     self._last_rx_ts = time.time()  # seed so first window is fair
                     while self.running:
@@ -221,7 +220,12 @@ class MeshCoreAdapter:
                                             if _ping_failures:
                                                 print(f"[meshcore_adapter] ping recovered after {_ping_failures} failure(s)")
                                             _ping_failures = 0
-                                            self._last_rx_ts = time.time()
+                                            # Only advance _last_rx_ts if a real message
+                                            # was delivered — NO_MORE_MSGS just means the
+                                            # serial command interface is alive, not that
+                                            # the RF radio is still receiving packets.
+                                            if result.type != EventType.NO_MORE_MSGS:
+                                                self._last_rx_ts = time.time()
                                     except Exception as e:
                                         _ping_failures += 1
                                         print(f"[meshcore_adapter] ping error ({_ping_failures}/{_PING_FAIL_MAX}): {e}")
@@ -229,13 +233,13 @@ class MeshCoreAdapter:
                                         raise RuntimeError(
                                             f"Device unresponsive after {_ping_failures} consecutive ping failures — forcing reconnect"
                                         )
-                        if now - _last_watchdog >= _WATCHDOG_SECS:
-                            _last_watchdog = now
-                            elapsed = time.time() - self._last_rx_ts
-                            if elapsed > _WATCHDOG_SECS:
-                                raise RuntimeError(
-                                    f"No firmware events for {int(elapsed)}s — forcing reconnect"
-                                )
+                        # Passive watchdog: checked every loop iteration so it fires
+                        # as soon as the threshold passes (no off-by-interval gap).
+                        elapsed = time.time() - self._last_rx_ts
+                        if elapsed > _WATCHDOG_SECS:
+                            raise RuntimeError(
+                                f"No RF events for {int(elapsed)}s — forcing reconnect"
+                            )
 
                     if gps_task:
                         gps_task.cancel()
