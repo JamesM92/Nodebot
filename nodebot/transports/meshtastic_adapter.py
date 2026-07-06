@@ -136,13 +136,19 @@ class MeshtasticAdapter:
                 info = getattr(self._iface, "myInfo", None)
                 self._my_node_num = getattr(info, "my_node_num", None)
                 print(f"[meshtastic_adapter] connected — node {self._my_node_num:08x}" if self._my_node_num else "[meshtastic_adapter] connected")
-                # Read PKI public key so it can be saved for QR code generation
+                # Read PKI public key so it can be saved for QR code generation.
+                # meshtastic's MessageToDict encodes bytes fields as standard base64
+                # strings, so publicKey arrives as str not bytes.
                 try:
                     import base64 as _b64
                     my_id = f"!{self._my_node_num:08x}" if self._my_node_num else None
                     if my_id and self._iface.nodes:
-                        pk = self._iface.nodes.get(my_id, {}).get("user", {}).get("publicKey", b"")
-                        if isinstance(pk, bytes) and pk:
+                        pk = self._iface.nodes.get(my_id, {}).get("user", {}).get("publicKey", "")
+                        if isinstance(pk, str) and pk:
+                            # Convert standard base64 → url-safe base64 (no padding)
+                            raw = _b64.b64decode(pk + "==")
+                            self._my_public_key_b64url = _b64.urlsafe_b64encode(raw).decode().rstrip("=")
+                        elif isinstance(pk, bytes) and pk:
                             self._my_public_key_b64url = _b64.urlsafe_b64encode(pk).decode().rstrip("=")
                 except Exception:
                     pass
