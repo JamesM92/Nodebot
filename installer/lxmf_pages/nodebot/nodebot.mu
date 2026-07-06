@@ -180,21 +180,26 @@ if lxmf_available:
     print("")
 if mesh_adapters:
     print("`_Meshtastic`_")
-    for _sec, _port, _preset, _json in mesh_adapters:
+    for _i, (_sec, _port, _preset, _json) in enumerate(mesh_adapters):
+        if _i > 0:
+            print("")
         _addr, _contact_url = _mesh_info_for(_json)
         _preset_label = _preset.replace("_", " ").title()
         if len(mesh_adapters) > 1:
-            print(f"{_preset_label}:  {_addr}")
+            _addr_line = f"{_preset_label}:  {_addr}"
         else:
-            print(f"{_addr}  ({_preset_label})")
+            _addr_line = f"{_addr}  ({_preset_label})"
         if _contact_url:
-            print(f"     `Fad8{_contact_url}`f")
+            print(f"{_addr_line}  `Fad8{_contact_url}`f")
+        else:
+            print(_addr_line)
     print("")
 if mc_addr is not None:
     print("`_MeshCore`_")
-    print(mc_addr)
     if mc_contact_url:
-        print(f"     `Fad8{mc_contact_url}`f")
+        print(f"{mc_addr}  `Fad8{mc_contact_url}`f")
+    else:
+        print(mc_addr)
     print("")
 print("`Fbbf`[Activity Feed`:/page/nodebot/activity.mu`]`f")
 print("`Fbbf`[System Diagnostics`:/page/nodebot/diag.mu`]`f")
