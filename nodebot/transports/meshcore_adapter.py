@@ -175,15 +175,24 @@ class MeshCoreAdapter:
                         gps_task = asyncio.create_task(self._gps_update_loop())
 
                     # Idle — callbacks drive everything from here.
-                    # Every 5 seconds dispatch a synthetic MESSAGES_WAITING so
-                    # the library's fetch loop drains any channel messages the
-                    # radio queued without sending an explicit notification.
-                    # Every 15 minutes probe device liveness; reconnect if no
-                    # response (handles silent serial disconnects).
+                    # Every 5 s  : dispatch synthetic MESSAGES_WAITING so the
+                    #              library drains any queued channel messages.
+                    # Every 3 min: active ping via get_msg() when no organic
+                    #              events have arrived; 3 consecutive failures
+                    #              force a reconnect (catches dead serial before
+                    #              the 15-min passive watchdog fires).
+                    # Every 15 min: passive watchdog — reconnect if no events
+                    #              at all (covers legitimately quiet networks
+                    #              where the ping itself keeps succeeding but
+                    #              push events have stopped).
                     _POLL_SECS      = 5.0
+                    _PING_SECS      = 3 * 60
+                    _PING_FAIL_MAX  = 3
                     _WATCHDOG_SECS  = 15 * 60
                     _last_poll      = asyncio.get_event_loop().time()
+                    _last_ping      = asyncio.get_event_loop().time()
                     _last_watchdog  = asyncio.get_event_loop().time()
+                    _ping_failures  = 0
                     self._last_rx_ts = time.time()  # seed so first window is fair
                     while self.running:
                         await asyncio.sleep(1)
@@ -194,6 +203,32 @@ class MeshCoreAdapter:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
+                        if now - _last_ping >= _PING_SECS:
+                            _last_ping = now
+                            if self._mc:
+                                organic_age = time.time() - self._last_rx_ts
+                                if organic_age < _PING_SECS:
+                                    # Recent organic event — device is alive
+                                    _ping_failures = 0
+                                else:
+                                    try:
+                                        result = await self._mc.commands.get_msg(timeout=10.0)
+                                        if result.type == EventType.ERROR:
+                                            _ping_failures += 1
+                                            reason = result.payload.get("reason", "?") if result.payload else "?"
+                                            print(f"[meshcore_adapter] ping failed ({_ping_failures}/{_PING_FAIL_MAX}): {reason}")
+                                        else:
+                                            if _ping_failures:
+                                                print(f"[meshcore_adapter] ping recovered after {_ping_failures} failure(s)")
+                                            _ping_failures = 0
+                                            self._last_rx_ts = time.time()
+                                    except Exception as e:
+                                        _ping_failures += 1
+                                        print(f"[meshcore_adapter] ping error ({_ping_failures}/{_PING_FAIL_MAX}): {e}")
+                                    if _ping_failures >= _PING_FAIL_MAX:
+                                        raise RuntimeError(
+                                            f"Device unresponsive after {_ping_failures} consecutive ping failures — forcing reconnect"
+                                        )
                         if now - _last_watchdog >= _WATCHDOG_SECS:
                             _last_watchdog = now
                             elapsed = time.time() - self._last_rx_ts
