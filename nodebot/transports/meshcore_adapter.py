@@ -45,6 +45,7 @@ class MeshCoreAdapter:
         self._recent_chan_msgs = {}  # (sender_ts, sender_id, text[:32]) -> timestamp for channel dedup
         self._seen_contacts = {}     # sender_id -> (rounded_lat, rounded_lon) for announce dedup
         self._last_periodic_announce = 0.0
+        self._last_rx_ts = 0.0       # updated on any event from the firmware; used by watchdog
         self._chan_names = {}        # chan_idx -> channel name (populated by _query_channels)
 
         _here = os.path.dirname(os.path.abspath(__file__))
@@ -177,8 +178,13 @@ class MeshCoreAdapter:
                     # Every 5 seconds dispatch a synthetic MESSAGES_WAITING so
                     # the library's fetch loop drains any channel messages the
                     # radio queued without sending an explicit notification.
-                    _POLL_SECS = 5.0
-                    _last_poll = asyncio.get_event_loop().time()
+                    # Every 15 minutes probe device liveness; reconnect if no
+                    # response (handles silent serial disconnects).
+                    _POLL_SECS      = 5.0
+                    _WATCHDOG_SECS  = 15 * 60
+                    _last_poll      = asyncio.get_event_loop().time()
+                    _last_watchdog  = asyncio.get_event_loop().time()
+                    self._last_rx_ts = time.time()  # seed so first window is fair
                     while self.running:
                         await asyncio.sleep(1)
                         now = asyncio.get_event_loop().time()
@@ -187,6 +193,13 @@ class MeshCoreAdapter:
                             if self._mc:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
+                                )
+                        if now - _last_watchdog >= _WATCHDOG_SECS:
+                            _last_watchdog = now
+                            elapsed = time.time() - self._last_rx_ts
+                            if elapsed > _WATCHDOG_SECS:
+                                raise RuntimeError(
+                                    f"No firmware events for {int(elapsed)}s — forcing reconnect"
                                 )
 
                     if gps_task:
@@ -561,6 +574,7 @@ class MeshCoreAdapter:
 
     async def _on_advertisement(self, event):
         """Handle incoming advertisement (node announce broadcast)."""
+        self._last_rx_ts = time.time()
         try:
             pub = event.payload.get("public_key", "")
             if not pub:
@@ -642,6 +656,7 @@ class MeshCoreAdapter:
 
     async def _on_channel_message(self, event):
 
+        self._last_rx_ts = time.time()
         try:
             payload = event.payload
             chan_idx = payload.get("channel_idx", 0)
@@ -718,6 +733,7 @@ class MeshCoreAdapter:
         library decrypts GRP_TXT (channel) payloads so we get plaintext
         even if the firmware never emits a CHANNEL_MSG_RECV packet.
         """
+        self._last_rx_ts = time.time()
         try:
             p = event.payload
             typename = p.get("payload_typename")
