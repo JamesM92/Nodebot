@@ -406,7 +406,11 @@ class MeshtasticAdapter:
         try:
             decoded = packet.get("decoded", {})
             portnum = decoded.get("portnum", "")
-            from_id = packet.get("fromId", "")
+            from_id = packet.get("fromId") or ""
+            if not from_id:
+                _from_num = packet.get("from")
+                if _from_num:
+                    from_id = f"!{_from_num:08x}"
 
             if portnum == "POSITION_APP":
                 self._log_position_announce(packet, decoded, from_id)

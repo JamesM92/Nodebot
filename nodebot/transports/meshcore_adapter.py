@@ -185,14 +185,16 @@ class MeshCoreAdapter:
                     #              at all (covers legitimately quiet networks
                     #              where the ping itself keeps succeeding but
                     #              push events have stopped).
-                    _POLL_SECS      = 5.0
-                    _PING_SECS      = 3 * 60
-                    _PING_FAIL_MAX  = 3
-                    _WATCHDOG_SECS  = 15 * 60
-                    _last_poll      = asyncio.get_event_loop().time()
-                    _last_ping      = asyncio.get_event_loop().time()
-                    _ping_failures  = 0
-                    self._last_rx_ts = time.time()  # seed so first window is fair
+                    _POLL_SECS        = 5.0
+                    _KEEPALIVE_SECS   = 30        # re-send APP_START when RF is quiet
+                    _PING_SECS        = 3 * 60
+                    _PING_FAIL_MAX    = 3
+                    _WATCHDOG_SECS    = 15 * 60
+                    _last_poll        = asyncio.get_event_loop().time()
+                    _last_keepalive   = asyncio.get_event_loop().time()
+                    _last_ping        = asyncio.get_event_loop().time()
+                    _ping_failures    = 0
+                    self._last_rx_ts  = time.time()  # seed so first window is fair
                     while self.running:
                         await asyncio.sleep(1)
                         now = asyncio.get_event_loop().time()
@@ -202,6 +204,22 @@ class MeshCoreAdapter:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
+                        # APP_START keepalive: unconditionally re-send the host-session
+                        # handshake every 30 s so the firmware never drifts into a state
+                        # where it stops pushing LOG_DATA events.  APP_START is safe to
+                        # re-send at any time — it only resets _iter_started on the
+                        # firmware side (aborts contact iteration, which we only do at
+                        # startup) and elicits a SELF_INFO response.
+                        if now - _last_keepalive >= _KEEPALIVE_SECS:
+                            _last_keepalive = now
+                            if self._mc:
+                                try:
+                                    result = await self._mc.commands.send_appstart()
+                                    if result.type == EventType.ERROR:
+                                        reason = result.payload.get("reason", "?") if result.payload else "?"
+                                        print(f"[meshcore_adapter] APP_START keepalive failed: {reason}")
+                                except Exception as _ka_err:
+                                    print(f"[meshcore_adapter] APP_START keepalive error: {_ka_err}")
                         if now - _last_ping >= _PING_SECS:
                             _last_ping = now
                             if self._mc:
@@ -261,6 +279,13 @@ class MeshCoreAdapter:
                     _retry += 1
                     print(f"[meshcore_adapter] connection error: {e} — retrying in {delay}s")
                     radio_status.update("meshcore", "error", error=str(e))
+                    # Explicitly close the serial transport so the old fd doesn't
+                    # compete with the new connection for bytes on the same port.
+                    if self._mc:
+                        try:
+                            await self._mc.disconnect()
+                        except Exception:
+                            pass
                     self._mc = None
                     if self.running:
                         await asyncio.sleep(delay)
