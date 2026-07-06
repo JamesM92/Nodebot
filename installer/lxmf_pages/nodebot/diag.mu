@@ -273,6 +273,65 @@ def _radio_label(name):
 def _status_color(status):
     return {"connected": "F4f6", "disconnected": "FF60", "error": "FF00"}.get(status, "F888")
 
+def _make_qr_ascii(data):
+    """Generate ASCII QR code for data using half-block characters."""
+    try:
+        import qrcode, io
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,
+            border=1,
+        )
+        qr.add_data(str(data))
+        qr.make(fit=True)
+        buf = io.StringIO()
+        qr.print_ascii(out=buf, tty=False)
+        return buf.getvalue().rstrip()
+    except Exception:
+        return None
+
+def _contact_addrs():
+    """Return list of (label, display_addr, qr_data) for each protocol.
+    MeshCore: meshcore://contact/add deep-link (app scans to add contact).
+    Meshtastic: https://meshtastic.org/v/PUBKEY_B64URL (verify/add contact).
+    """
+    addrs = []
+    # MeshCore: deep-link that the MeshCore app can scan to add as a contact
+    try:
+        mc_j = os.path.join(storage, "meshcore_node.json")
+        with open(mc_j) as f:
+            mc_key = json.load(f).get("public_key", "")
+        if mc_key:
+            import urllib.parse
+            qr_url = (f"meshcore://contact/add"
+                      f"?name={urllib.parse.quote(bot_name)}"
+                      f"&public_key={mc_key}"
+                      f"&type=1")
+            addrs.append(("MeshCore", mc_key[:16] + "...", qr_url))
+    except Exception:
+        pass
+    # Meshtastic: per-node contact QR using the device's PKI public key
+    for sec in config.sections():
+        if sec != "meshtastic" and not sec.startswith("meshtastic"):
+            continue
+        preset = config.get(sec, "modem_preset", fallback="").strip().upper()
+        abbr = {"LONG_FAST": "LF", "MEDIUM_FAST": "MF", "LONG_SLOW": "LS",
+                "MEDIUM_SLOW": "MS", "SHORT_FAST": "SF"}.get(preset, preset[:4] if preset else "?")
+        json_path = os.path.join(storage, f"{sec}_lora.json")
+        try:
+            with open(json_path) as f:
+                d = json.load(f)
+            pk_b64url = d.get("public_key_b64url", "")
+            node_num = d.get("my_node_num")
+            node_id = "!{:08x}".format(int(node_num)) if node_num else ""
+            if pk_b64url:
+                url = f"https://meshtastic.org/v/{pk_b64url}"
+                addrs.append((f"Meshtastic ({abbr})", node_id or pk_b64url[:12] + "...", url))
+        except Exception:
+            pass
+    return addrs
+
 # ── Fetch all data ─────────────────────────────────────────────
 now_str        = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 radio_st       = _radio_status()
@@ -474,6 +533,26 @@ for key, label in [("uptime", "Pi uptime"), ("cpu_temp", "CPU temp"),
         p(f"  `F888{label:<14}`f  {sys_stats[key]}")
 
 p("")
+
+# ─────────────────────────────────────────────────────────────
+# Contact QR Codes
+# ─────────────────────────────────────────────────────────────
+contact_addrs = _contact_addrs()
+if contact_addrs:
+    p(">Contact QR Codes")
+    p("")
+    p("  `F888Scan to add NodeBot as a contact`f")
+    p("")
+    for label, display, qr_data in contact_addrs:
+        p(f"  `_{label}`_")
+        p(f"  `F888{display}`f")
+        p("")
+        qr = _make_qr_ascii(qr_data)
+        if qr:
+            for line in qr.split("\n"):
+                p("  " + line)
+        p("")
+
 p("`l")
 p("`Fbbf`[← Main Page`:/page/weewx/weewx.mu`]`f")
 p("")

@@ -63,31 +63,41 @@ if lxmf_available:
     else:
         lxmf_addr = "start NodeBot once to generate"
 
-# ── Meshtastic node IDs (one per configured adapter) ─────────
-def _mesh_addr_for(json_name):
+# ── Meshtastic node IDs + contact URL (one per configured adapter) ───────────
+def _mesh_info_for(json_name):
+    """Return (node_addr_str, contact_url_or_none) from a lora JSON file."""
     lora_json = os.path.join(storage, json_name)
     if os.path.isfile(lora_json):
         try:
             with open(lora_json) as f:
                 d = json.load(f)
-            num = d.get("my_node_num")
-            if num:
-                return "mesh:{:08x}".format(int(num))
+            num      = d.get("my_node_num")
+            pk_b64   = d.get("public_key_b64url", "")
+            node_str = "mesh:{:08x}".format(int(num)) if num else None
+            url      = f"https://meshtastic.org/v/{pk_b64}" if pk_b64 else None
+            if node_str:
+                return node_str, url
         except Exception:
             pass
-    return "mesh:[start NodeBot to populate]"
+    return "mesh:[start NodeBot to populate]", None
 
 # ── MeshCore ─────────────────────────────────────────────────
-mc_addr = None
+mc_addr         = None
+mc_contact_url  = None
 if mc_available:
     mc_json = os.path.join(storage, "meshcore_node.json")
     if os.path.isfile(mc_json):
         try:
+            import urllib.parse
             with open(mc_json) as f:
                 d = json.load(f)
             pubkey = d.get("public_key", "")
             if pubkey:
                 mc_addr = "mc:" + pubkey[:8]
+                mc_contact_url = (f"meshcore://contact/add"
+                                  f"?name={urllib.parse.quote(bot_name)}"
+                                  f"&public_key={pubkey}"
+                                  f"&type=1")
         except Exception:
             pass
     if mc_addr is None:
@@ -170,16 +180,22 @@ if lxmf_available:
 if mesh_adapters:
     print("`_Meshtastic`_")
     for _sec, _port, _preset, _json in mesh_adapters:
-        _addr         = _mesh_addr_for(_json)
+        _addr, _contact_url = _mesh_info_for(_json)
         _preset_label = _preset.replace("_", " ").title()
         if len(mesh_adapters) > 1:
             print(f"{_preset_label}:  {_addr}")
+            if _contact_url:
+                print(f"`F888Add contact:`f  {_contact_url}")
         else:
             print(f"{_addr}  ({_preset_label})")
+            if _contact_url:
+                print(f"`F888Add contact:`f  {_contact_url}")
     print("")
 if mc_addr is not None:
     print("`_MeshCore`_")
     print(mc_addr)
+    if mc_contact_url:
+        print(f"`F888Add contact:`f  {mc_contact_url}")
     print("")
 print("`Fbbf`[Activity Feed`:/page/nodebot/activity.mu`]`f")
 print("`Fbbf`[System Diagnostics`:/page/nodebot/diag.mu`]`f")

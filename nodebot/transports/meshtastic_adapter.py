@@ -47,6 +47,7 @@ class MeshtasticAdapter:
         self._thread = None
         self.running = False
         self._my_node_num = None
+        self._my_public_key_b64url = None  # PKI public key, set on connect
         self._subscribed = False
         self._disconnected = threading.Event()
         self._lora_configured = False  # only write LoRa config once per process lifetime
@@ -135,6 +136,16 @@ class MeshtasticAdapter:
                 info = getattr(self._iface, "myInfo", None)
                 self._my_node_num = getattr(info, "my_node_num", None)
                 print(f"[meshtastic_adapter] connected — node {self._my_node_num:08x}" if self._my_node_num else "[meshtastic_adapter] connected")
+                # Read PKI public key so it can be saved for QR code generation
+                try:
+                    import base64 as _b64
+                    my_id = f"!{self._my_node_num:08x}" if self._my_node_num else None
+                    if my_id and self._iface.nodes:
+                        pk = self._iface.nodes.get(my_id, {}).get("user", {}).get("publicKey", b"")
+                        if isinstance(pk, bytes) and pk:
+                            self._my_public_key_b64url = _b64.urlsafe_b64encode(pk).decode().rstrip("=")
+                except Exception:
+                    pass
                 _retry = 0  # reset backoff on successful connect
 
                 # Subscriptions — guard against duplicate subscribe on reconnect
@@ -369,6 +380,8 @@ class MeshtasticAdapter:
                 update["node_name"] = self._node_name
             if self._my_node_num is not None:
                 update["my_node_num"] = self._my_node_num
+            if self._my_public_key_b64url:
+                update["public_key_b64url"] = self._my_public_key_b64url
             existing.update(update)
             with open(self._lora_state_path(), "w") as f:
                 json.dump(existing, f)

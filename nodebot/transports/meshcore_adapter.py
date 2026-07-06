@@ -660,10 +660,12 @@ class MeshCoreAdapter:
                 text = m.group(2).strip()
 
             # Dedup across CHANNEL_MSG_RECV and RX_LOG_DATA paths.
-            # Include sender_id so two different nodes sending the same short
-            # message within 60s don't suppress each other (especially when
-            # sender_ts=0 on nodes without time sync).
-            dedup_key = (sender_ts, sender_id or "", text[:32])
+            # Key on (sender_ts, text-after-pubkey-prefix) so both paths produce
+            # the same key for the same message.  The rflog path never has the
+            # pubkey prefix, so using sender_id here would break cross-path dedup.
+            # Using the full text (not truncated) means relay copies of the same
+            # packet — identical text, same sender_ts — are also suppressed.
+            dedup_key = (sender_ts, text)
             now_ts = time.time()
             stale = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
             for k in stale:
@@ -778,9 +780,10 @@ class MeshCoreAdapter:
             sender_ts = p.get("sender_timestamp", 0)
 
             # Dedup against messages already seen via CHANNEL_MSG_RECV.
-            # Include sender_id so nodes without time sync (sender_ts=0) don't
-            # suppress each other when they happen to send the same short text.
-            dedup_key = (sender_ts, sender_id or "", text[:32])
+            # Key on (sender_ts, text-after-pubkey-prefix) — same strategy as
+            # _on_channel_message — so relay copies and cross-path duplicates
+            # share the same key and are suppressed.
+            dedup_key = (sender_ts, text)
             now_ts = time.time()
             stale = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
             for k in stale:
