@@ -198,16 +198,17 @@ class MeshCoreAdapter:
                     #                (which floods RF on quiet networks), we watch
                     #                _last_rx_ts: if no rflog event has arrived in
                     #                _PUSH_REACTIVATE seconds we send one advert to
-                    #                reactivate. On a busy network this rarely fires;
-                    #                on a quiet network it fires at most every
-                    #                _PUSH_REACTIVATE seconds. RF advert frequency is
+                    #                reactivate. On a busy network (events < 2 min
+                    #                apart) this never fires; on a quiet network it
+                    #                fires every _PUSH_REACTIVATE seconds. RF advert
+                    #                frequency is
                     #                therefore proportional to actual silence, not a
                     #                fixed clock.
                     # Every 3 min  : active ping via get_msg() when no organic events;
                     #                3 failures force reconnect.
                     # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
-                    _PUSH_REACTIVATE  = 4 * 60   # reactivate push mode after 4 min silence
+                    _PUSH_REACTIVATE  = 2 * 60   # reactivate push mode after 2 min silence
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
                     _WATCHDOG_SECS    = 25 * 60
