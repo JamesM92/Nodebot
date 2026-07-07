@@ -79,10 +79,17 @@ done
 echo ""
 
 # ── Step 2: Bind cp210x for non-standard product IDs ─────────
+# Handles: 10c4:non-ea60 — Silicon Labs with custom PID (e.g. MeshCore)
+#          0000:0000      — CP2102 with blank/corrupted EEPROM; cp210x won't
+#                           auto-bind these since 0000:0000 is not in its id_table
 for sysdev in /sys/bus/usb/devices/*/; do
     vid=$(cat "$sysdev/idVendor" 2>/dev/null || true)
     pid=$(cat "$sysdev/idProduct" 2>/dev/null || true)
-    [[ "$vid" == "10c4" && "$pid" != "ea60" && -n "$pid" ]] || continue
+    [[ -n "$vid" && -n "$pid" ]] || continue
+    needs_bind=false
+    [[ "$vid" == "10c4" && "$pid" != "ea60" ]] && needs_bind=true
+    [[ "$vid" == "0000" && "$pid" == "0000" ]] && needs_bind=true
+    $needs_bind || continue
     if ! ls "$sysdev"*/tty* &>/dev/null 2>&1; then
         echo "  Binding cp210x driver to ${vid}:${pid} ..."
         sudo modprobe cp210x 2>/dev/null || true
@@ -509,6 +516,16 @@ make_rule() {
         [[ "$id_serial_short" == "$g" ]] && is_generic=true && break
     done
 
+    # Detect CP2102 with non-standard VID:PID (e.g. 0000:0000 blank EEPROM) that was
+    # registered via new_id.  These need an ACTION=="add" rule so the driver re-binds
+    # on every hotplug event, not just once at boot via the systemd service.
+    local needs_cp210x_bind=false
+    if [[ "$id_vendor" != "10c4" && "$id_vendor" != "1a86" && -n "$id_vendor" ]]; then
+        local tty_driver
+        tty_driver=$(readlink -f "/sys/class/tty/$(basename "$port")/device/driver" 2>/dev/null || true)
+        [[ "$tty_driver" == */cp210x ]] && needs_cp210x_bind=true
+    fi
+
     local rule="" bind_rule=""
 
     if [[ -n "$id_serial" ]] && ! $is_generic; then
@@ -519,6 +536,12 @@ make_rule() {
     elif [[ "$id_vendor" == "1a86" ]]; then
         rule="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"${id_model_id}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
     else
+        # Non-standard or unknown chip — fall back to physical port binding.
+        # If driven by cp210x via new_id (e.g. 0000:0000 blank EEPROM), also emit
+        # the ACTION rule so the driver re-registers on every hotplug event.
+        if $needs_cp210x_bind; then
+            bind_rule="ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"${id_vendor}\", ATTRS{idProduct}==\"${id_model_id}\", RUN+=\"/bin/sh -c 'echo ${id_vendor} ${id_model_id} > /sys/bus/usb-serial/drivers/cp210x/new_id'\""
+        fi
         rule="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", GROUP=\"dialout\", MODE=\"0660\", SYMLINK+=\"${symlink}\""
     fi
 

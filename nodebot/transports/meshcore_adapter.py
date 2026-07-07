@@ -152,7 +152,8 @@ class MeshCoreAdapter:
                     await self._query_channels()
                     await self._set_node_name()
                     await self._set_gps_location()
-                    await self._announce_async()
+                    # _announce_async() is intentionally NOT called here.
+                    # See drain comment below.
 
                     sub = self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_message)
                     sub_chan = self._mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_message)
@@ -161,6 +162,20 @@ class MeshCoreAdapter:
                     sub_path = self._mc.subscribe(EventType.PATH_UPDATE, self._on_path_update)
 
                     await self._mc.start_auto_message_fetching()
+
+                    # Drain all queued messages BEFORE sending the startup advert.
+                    # The firmware's push-mode init timer (~28s) is reset by each
+                    # get_msg() call while the queue is non-empty.  If we advertise
+                    # first and then drain, the burst of drain calls resets the
+                    # timer and push mode never activates.  By draining first the
+                    # queue is empty when we advertise, so nothing interferes with
+                    # the timer and push mode activates ~28-46s after the advert.
+                    for _ in range(300):  # safety cap — firmware queue max ~100
+                        _r = await self._mc.commands.get_msg(timeout=2.0)
+                        if _r.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                            break
+
+                    await self._announce_async()
                     print("[meshcore_adapter] listening for messages")
                     radio_status.update("meshcore", "connected")
 
@@ -175,23 +190,27 @@ class MeshCoreAdapter:
                         gps_task = asyncio.create_task(self._gps_update_loop())
 
                     # Idle — callbacks drive everything from here.
-                    # Every 5 s  : dispatch synthetic MESSAGES_WAITING so the
-                    #              library drains any queued channel messages.
-                    # Every 3 min: active ping via get_msg() when no organic
-                    #              events have arrived; 3 consecutive failures
-                    #              force a reconnect (catches dead serial before
-                    #              the 15-min passive watchdog fires).
-                    # Every 15 min: passive watchdog — reconnect if no events
-                    #              at all (covers legitimately quiet networks
-                    #              where the ping itself keeps succeeding but
-                    #              push events have stopped).
+                    # Every 5 s    : dispatch MESSAGES_WAITING to drain queued msgs.
+                    # Push mode    : activated by the startup advert (above).
+                    #                Firmware times push mode out after ~5 min of
+                    #                silence. Rather than a fixed-interval advert
+                    #                (which floods RF on quiet networks), we watch
+                    #                _last_rx_ts: if no rflog event has arrived in
+                    #                _PUSH_REACTIVATE seconds we send one advert to
+                    #                reactivate. On a busy network this rarely fires;
+                    #                on a quiet network it fires at most every
+                    #                _PUSH_REACTIVATE seconds. RF advert frequency is
+                    #                therefore proportional to actual silence, not a
+                    #                fixed clock.
+                    # Every 3 min  : active ping via get_msg() when no organic events;
+                    #                3 failures force reconnect.
+                    # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
-                    _KEEPALIVE_SECS   = 30        # re-send APP_START when RF is quiet
+                    _PUSH_REACTIVATE  = 4 * 60   # reactivate push mode after 4 min silence
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
-                    _WATCHDOG_SECS    = 15 * 60
+                    _WATCHDOG_SECS    = 25 * 60
                     _last_poll        = asyncio.get_event_loop().time()
-                    _last_keepalive   = asyncio.get_event_loop().time()
                     _last_ping        = asyncio.get_event_loop().time()
                     _ping_failures    = 0
                     self._last_rx_ts  = time.time()  # seed so first window is fair
@@ -204,22 +223,18 @@ class MeshCoreAdapter:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
-                        # APP_START keepalive: unconditionally re-send the host-session
-                        # handshake every 30 s so the firmware never drifts into a state
-                        # where it stops pushing LOG_DATA events.  APP_START is safe to
-                        # re-send at any time — it only resets _iter_started on the
-                        # firmware side (aborts contact iteration, which we only do at
-                        # startup) and elicits a SELF_INFO response.
-                        if now - _last_keepalive >= _KEEPALIVE_SECS:
-                            _last_keepalive = now
-                            if self._mc:
-                                try:
-                                    result = await self._mc.commands.send_appstart()
-                                    if result.type == EventType.ERROR:
-                                        reason = result.payload.get("reason", "?") if result.payload else "?"
-                                        print(f"[meshcore_adapter] APP_START keepalive failed: {reason}")
-                                except Exception as _ka_err:
-                                    print(f"[meshcore_adapter] APP_START keepalive error: {_ka_err}")
+                        rflog_age = time.time() - self._last_rx_ts
+                        if rflog_age >= _PUSH_REACTIVATE and self._mc:
+                            # rflog has been silent long enough that push mode may
+                            # have timed out. Send one advert to reactivate it.
+                            # Reset _last_rx_ts immediately so this doesn't fire
+                            # again every second until the first rflog event arrives.
+                            self._last_rx_ts = time.time()
+                            try:
+                                print("[meshcore_adapter] push mode reactivation (rflog silent)")
+                                await self._mc.commands.send_advert()
+                            except Exception as _ra_err:
+                                print(f"[meshcore_adapter] push mode reactivation error: {_ra_err}")
                         if now - _last_ping >= _PING_SECS:
                             _last_ping = now
                             if self._mc:

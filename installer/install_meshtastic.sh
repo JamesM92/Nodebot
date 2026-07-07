@@ -262,6 +262,7 @@ print(write_serial(sys.argv[1], sys.argv[2]))
 PYEOF
 )
 
+BIND_RULE=""
 if [[ -n "$id_serial" ]] && ! $is_generic; then
     # Already has a unique serial number
     RULE="SUBSYSTEM==\"tty\", ENV{ID_SERIAL}==\"${id_serial}\", SYMLINK+=\"meshtastic0\""
@@ -299,18 +300,28 @@ elif [[ "$id_vendor" == "10c4" ]]; then
     fi
 
 else
-    # Unknown chip type — fall back to port-based rule
+    # Unknown chip — fall back to port-based rule.
+    # If the device is driven by cp210x via new_id (e.g. 0000:0000 blank EEPROM),
+    # also emit an ACTION rule so the driver re-registers on every hotplug event.
     RULE="SUBSYSTEM==\"tty\", ENV{ID_PATH}==\"${id_path}\", SYMLINK+=\"meshtastic0\""
-    echo "  Unknown USB chip (vendor ${id_vendor}) — symlink tied to physical USB port."
+    _tty_driver=$(readlink -f "/sys/class/tty/$(basename "$CHOSEN_PORT")/device/driver" 2>/dev/null || true)
+    if [[ "$_tty_driver" == */cp210x ]]; then
+        BIND_RULE="ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"${id_vendor}\", ATTRS{idProduct}==\"${id_model_id}\", RUN+=\"/bin/sh -c 'echo ${id_vendor} ${id_model_id} > /sys/bus/usb-serial/drivers/cp210x/new_id'\""
+        echo "  Non-standard CP2102 (VID:PID ${id_vendor}:${id_model_id}) — port binding + cp210x new_id rule."
+        echo "  Keep this device in the same USB port, or re-run this installer if you move it."
+    else
+        echo "  Unknown USB chip (vendor ${id_vendor}) — symlink tied to physical USB port."
+    fi
 fi
 
-sudo tee /etc/udev/rules.d/99-meshtastic.rules > /dev/null <<UDEV
-# Meshtastic stable device naming — written by NodeBot Meshtastic installer
-# Creates /dev/meshtastic0 tied to device identity.
-
-# Device: $CHOSEN_PORT — ${MESH_LABELS[$CHOSEN_IDX]}
-$RULE
-UDEV
+{
+    echo "# Meshtastic stable device naming — written by NodeBot Meshtastic installer"
+    echo "# Creates /dev/meshtastic0 tied to device identity."
+    echo ""
+    echo "# Device: $CHOSEN_PORT — ${MESH_LABELS[$CHOSEN_IDX]}"
+    [[ -n "$BIND_RULE" ]] && echo "$BIND_RULE"
+    echo "$RULE"
+} | sudo tee /etc/udev/rules.d/99-meshtastic.rules > /dev/null
 
 sudo udevadm control --reload-rules
 sudo udevadm trigger
