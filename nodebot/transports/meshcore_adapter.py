@@ -176,6 +176,7 @@ class MeshCoreAdapter:
                             break
 
                     await self._announce_async()
+                    self._last_periodic_announce = time.time()
                     print("[meshcore_adapter] listening for messages")
                     radio_status.update("meshcore", "connected")
 
