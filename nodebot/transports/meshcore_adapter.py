@@ -192,13 +192,20 @@ class MeshCoreAdapter:
 
                     # Idle — callbacks drive everything from here.
                     # Every 5 s    : dispatch MESSAGES_WAITING to drain queued msgs.
-                    # Push mode    : always active for USB serial (firmware streams
-                    #                LOG_DATA unconditionally; isConnected() returns
-                    #                true always). No keepalive needed.
+                    # RX reset     : The SX126x radio can enter a stuck-RX state
+                    #                after extended RF silence, stopping all packet
+                    #                reception. Sending send_advert() forces a TX→RX
+                    #                cycle that resets the radio. We trigger this
+                    #                after _RX_RESET_SECS of rflog silence. On an
+                    #                active network this rarely fires; on a quiet
+                    #                network it fires every _RX_RESET_SECS. This is
+                    #                a hardware workaround, not a push-mode keepalive
+                    #                (firmware streams LOG_DATA unconditionally).
                     # Every 3 min  : active ping via get_msg() when no organic events;
                     #                3 failures force reconnect.
                     # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
+                    _RX_RESET_SECS    = 3 * 60   # TX→RX reset for stuck SX126x radio
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
                     _WATCHDOG_SECS    = 25 * 60
@@ -215,6 +222,14 @@ class MeshCoreAdapter:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
+                        rflog_age = time.time() - self._last_rx_ts
+                        if rflog_age >= _RX_RESET_SECS and self._mc:
+                            self._last_rx_ts = time.time()
+                            try:
+                                print("[meshcore_adapter] RX reset (rflog silent — forcing TX→RX cycle)")
+                                await self._mc.commands.send_advert()
+                            except Exception as _rx_err:
+                                print(f"[meshcore_adapter] RX reset error: {_rx_err}")
                         if now - _last_ping >= _PING_SECS:
                             _last_ping = now
                             if self._mc:
