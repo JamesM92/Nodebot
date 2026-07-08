@@ -192,23 +192,13 @@ class MeshCoreAdapter:
 
                     # Idle — callbacks drive everything from here.
                     # Every 5 s    : dispatch MESSAGES_WAITING to drain queued msgs.
-                    # Push mode    : activated by the startup advert (above).
-                    #                Firmware times push mode out after ~5 min of
-                    #                silence. Rather than a fixed-interval advert
-                    #                (which floods RF on quiet networks), we watch
-                    #                _last_rx_ts: if no rflog event has arrived in
-                    #                _PUSH_REACTIVATE seconds we send one advert to
-                    #                reactivate. On a busy network (events < 2 min
-                    #                apart) this never fires; on a quiet network it
-                    #                fires every _PUSH_REACTIVATE seconds. RF advert
-                    #                frequency is
-                    #                therefore proportional to actual silence, not a
-                    #                fixed clock.
+                    # Push mode    : always active for USB serial (firmware streams
+                    #                LOG_DATA unconditionally; isConnected() returns
+                    #                true always). No keepalive needed.
                     # Every 3 min  : active ping via get_msg() when no organic events;
                     #                3 failures force reconnect.
                     # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
-                    _PUSH_REACTIVATE  = 2 * 60   # reactivate push mode after 2 min silence
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
                     _WATCHDOG_SECS    = 25 * 60
@@ -225,18 +215,6 @@ class MeshCoreAdapter:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
-                        rflog_age = time.time() - self._last_rx_ts
-                        if rflog_age >= _PUSH_REACTIVATE and self._mc:
-                            # rflog has been silent long enough that push mode may
-                            # have timed out. Send one advert to reactivate it.
-                            # Reset _last_rx_ts immediately so this doesn't fire
-                            # again every second until the first rflog event arrives.
-                            self._last_rx_ts = time.time()
-                            try:
-                                print("[meshcore_adapter] push mode reactivation (rflog silent)")
-                                await self._mc.commands.send_advert()
-                            except Exception as _ra_err:
-                                print(f"[meshcore_adapter] push mode reactivation error: {_ra_err}")
                         if now - _last_ping >= _PING_SECS:
                             _last_ping = now
                             if self._mc:
