@@ -175,7 +175,7 @@ class MeshCoreAdapter:
                         if _r.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
                             break
 
-                    await self._announce_async()
+                    await self._announce_async(flood=False)
                     self._last_periodic_announce = time.time()
                     print("[meshcore_adapter] listening for messages")
                     radio_status.update("meshcore", "connected")
@@ -1036,10 +1036,11 @@ class MeshCoreAdapter:
         except Exception as e:
             print(f"[meshcore_adapter] announce error: {e}")
 
-    async def _announce_async(self):
+    async def _announce_async(self, flood=True):
         try:
-            await self._mc.commands.send_advert()
-            print("[meshcore_adapter] announced on network")
+            await self._mc.commands.send_advert(flood=flood)
+            label = "flood" if flood else "zero-hop"
+            print(f"[meshcore_adapter] announced on network ({label})")
         except Exception as e:
             print(f"[meshcore_adapter] announce failed: {e}")
 
