@@ -192,20 +192,21 @@ class MeshCoreAdapter:
 
                     # Idle — callbacks drive everything from here.
                     # Every 5 s    : dispatch MESSAGES_WAITING to drain queued msgs.
-                    # RX reset     : The SX126x radio can enter a stuck-RX state
-                    #                after extended RF silence, stopping all packet
-                    #                reception. Sending send_advert() forces a TX→RX
-                    #                cycle that resets the radio. We trigger this
-                    #                after _RX_RESET_SECS of rflog silence. On an
-                    #                active network this rarely fires; on a quiet
-                    #                network it fires every _RX_RESET_SECS. This is
-                    #                a hardware workaround, not a push-mode keepalive
-                    #                (firmware streams LOG_DATA unconditionally).
+                    # AGC reset    : The SX126x AGC (automatic gain controller) can
+                    #                latch onto interference and make the radio deaf
+                    #                even though firmware state still shows STATE_RX.
+                    #                No packets are decoded, so LOG_DATA stops.
+                    #                Standalone firmware avoids this via its 2-min
+                    #                advert timer (natural TX→RX cycles). Companion
+                    #                firmware has no automatic TX, so we must do it
+                    #                ourselves. send_advert() drives TX→RX→startReceive()
+                    #                which resets the analog frontend and clears the
+                    #                lockup. See: github.com/meshcore-dev/MeshCore #2868.
                     # Every 3 min  : active ping via get_msg() when no organic events;
                     #                3 failures force reconnect.
                     # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
-                    _RX_RESET_SECS    = 3 * 60   # TX→RX reset for stuck SX126x radio
+                    _RX_RESET_SECS    = 2 * 60   # AGC lockup reset — match standalone 2-min advert cadence
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
                     _WATCHDOG_SECS    = 25 * 60
@@ -226,7 +227,7 @@ class MeshCoreAdapter:
                         if rflog_age >= _RX_RESET_SECS and self._mc:
                             self._last_rx_ts = time.time()
                             try:
-                                print("[meshcore_adapter] RX reset (rflog silent — forcing TX→RX cycle)")
+                                print("[meshcore_adapter] AGC reset (rflog silent — clearing SX126x AGC lockup via TX→RX)")
                                 await self._mc.commands.send_advert()
                             except Exception as _rx_err:
                                 print(f"[meshcore_adapter] RX reset error: {_rx_err}")
