@@ -227,10 +227,19 @@ class MeshCoreAdapter:
                         if rflog_age >= _RX_RESET_SECS and self._mc:
                             self._last_rx_ts = time.time()
                             try:
-                                print("[meshcore_adapter] AGC reset (rflog silent — clearing SX126x AGC lockup via TX→RX)")
-                                await self._mc.commands.send_advert()
+                                info = self._mc.self_info
+                                freq = info.get("radio_freq")
+                                bw   = info.get("radio_bw")
+                                sf   = info.get("radio_sf")
+                                cr   = info.get("radio_cr")
+                                if freq and bw and sf and cr:
+                                    print("[meshcore_adapter] AGC reset (silent — set_radio standby→RX cycle)")
+                                    await self._mc.commands.set_radio(freq, bw, sf, cr)
+                                else:
+                                    print("[meshcore_adapter] AGC reset (no radio params yet — falling back to send_advert)")
+                                    await self._mc.commands.send_advert()
                             except Exception as _rx_err:
-                                print(f"[meshcore_adapter] RX reset error: {_rx_err}")
+                                print(f"[meshcore_adapter] AGC reset error: {_rx_err}")
                         if now - _last_ping >= _PING_SECS:
                             _last_ping = now
                             if self._mc:
