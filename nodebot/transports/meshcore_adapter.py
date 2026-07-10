@@ -68,9 +68,21 @@ class MeshCoreAdapter:
         self._gps_device    = cfg.get("gps", "gps_device",    fallback="").strip()
         self._gps_precision = int(cfg.get("gps", "gps_precision", fallback="4").strip())
 
+        _freq = cfg.get("meshcore", "radio_freq", fallback="").strip()
+        _bw   = cfg.get("meshcore", "radio_bw",   fallback="").strip()
+        _sf   = cfg.get("meshcore", "radio_sf",   fallback="").strip()
+        _cr   = cfg.get("meshcore", "radio_cr",   fallback="").strip()
+        self._radio_freq = float(_freq) if _freq else None
+        self._radio_bw   = float(_bw)   if _bw   else None
+        self._radio_sf   = int(_sf)     if _sf   else None
+        self._radio_cr   = int(_cr)     if _cr   else None
+
         # Track last coordinates pushed to the radio (rounded)
         self._last_gps_lat = None
         self._last_gps_lon = None
+
+        self._self_info_payload = None
+        self._self_info_event = None  # asyncio.Event, created per connection in _async_main
 
         print(f"[meshcore_adapter] port={self.port} baud={self.baudrate} gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
 
@@ -107,6 +119,27 @@ class MeshCoreAdapter:
         finally:
             self._loop.close()
 
+    def _reset_esp32_to_app(self):
+        """Pulse DTR/RTS to boot ESP32 into application mode before APP_START.
+
+        Heltec V3 auto-reset circuit: RTS→cap→EN, DTR→cap→GPIO0.
+        This sequence boots into app (not bootloader) and lets the firmware
+        settle before meshcore-py opens the port and sends APP_START.
+        """
+        import serial as _serial, time as _time
+        try:
+            s = _serial.Serial(self.port, self.baudrate,
+                               dsrdtr=False, rtscts=False, timeout=0)
+            # Assert reset (EN low) while holding GPIO0 high (app mode)
+            s.dtr = True   # GPIO0 high = app mode
+            s.rts = True   # EN low = reset asserted
+            _time.sleep(0.1)
+            s.rts = False  # EN high = reset released → board boots into app
+            _time.sleep(3.5)  # wait for firmware to fully initialise
+            s.close()
+        except Exception as e:
+            print(f"[meshcore_adapter] pre-connect reset failed (non-fatal): {e}")
+
     # =====================================================
     # ASYNC MAIN
     # =====================================================
@@ -129,6 +162,8 @@ class MeshCoreAdapter:
 
                     # Subscribe before connect so _on_self_info fires when
                     # send_appstart() triggers SELF_INFO during the handshake.
+                    self._self_info_event = asyncio.Event()
+                    self._self_info_payload = None
                     self._mc.subscribe(EventType.SELF_INFO, self._on_self_info)
 
                     conn_result = await self._mc.connect()
@@ -145,6 +180,31 @@ class MeshCoreAdapter:
                     # Yield to the event loop so pending async callbacks
                     # (_on_self_info) can run before the rest of setup.
                     await asyncio.sleep(0.2)
+
+                    # Correct radio config BEFORE other setup commands.
+                    # set_radio() triggers a firmware radio reinit that blocks the
+                    # serial command interface; running it here (serialised, not in a
+                    # background callback) prevents _query_channels / _set_node_name /
+                    # _set_gps_location from hitting 15-second command timeouts while
+                    # the reinit is in progress.
+                    if self._self_info_payload and self._radio_freq is not None:
+                        radio_changed = await self._check_radio_config(self._self_info_payload)
+                        if radio_changed:
+                            # Firmware emits a new SELF_INFO once the radio reinit
+                            # is complete.  Wait for it (timeout = 10 s) so we know
+                            # the command interface is ready before we continue.
+                            self._self_info_event.clear()
+                            try:
+                                await asyncio.wait_for(
+                                    self._self_info_event.wait(), timeout=10.0
+                                )
+                                new_freq = (self._self_info_payload or {}).get("radio_freq")
+                                print(f"[meshcore_adapter] radio reinit confirmed: {new_freq} MHz")
+                            except asyncio.TimeoutError:
+                                print(
+                                    "[meshcore_adapter] radio reinit: no confirming SELF_INFO "
+                                    "within 10 s — continuing anyway"
+                                )
 
                     await self._mc.ensure_contacts()
                     print(f"[meshcore_adapter] contacts loaded: {len(self._mc.contacts)}")
@@ -192,14 +252,18 @@ class MeshCoreAdapter:
 
                     # Idle — callbacks drive everything from here.
                     # Every 5 s    : dispatch MESSAGES_WAITING to drain queued msgs.
+                    # Every 2 min  : AGC reset via zero-hop send_advert() if rflog
+                    #                silent — clears SX126x AGC lockup (issue #2868).
                     # Every 3 min  : active ping via get_msg() when no organic events;
                     #                3 failures force reconnect.
                     # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
+                    _RX_RESET_SECS    = 2 * 60
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
                     _WATCHDOG_SECS    = 25 * 60
                     _last_poll        = asyncio.get_event_loop().time()
+                    _last_agc_reset   = asyncio.get_event_loop().time()
                     _last_ping        = asyncio.get_event_loop().time()
                     _ping_failures    = 0
                     self._last_rx_ts  = time.time()  # seed so first window is fair
@@ -212,6 +276,12 @@ class MeshCoreAdapter:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
+                        if now - _last_agc_reset >= _RX_RESET_SECS:
+                            _last_agc_reset = now
+                            if self._mc:
+                                silent_secs = time.time() - self._last_rx_ts
+                                if silent_secs >= _RX_RESET_SECS:
+                                    await self._announce_async(flood=False)
                         if now - _last_ping >= _PING_SECS:
                             _last_ping = now
                             if self._mc:
@@ -305,7 +375,11 @@ class MeshCoreAdapter:
             print(f"[meshcore_adapter] could not set node name: {e}")
 
     async def _on_self_info(self, event):
-        self._save_node_info(getattr(event, "payload", None))
+        info = getattr(event, "payload", None)
+        self._self_info_payload = info
+        if self._self_info_event:
+            self._self_info_event.set()
+        self._save_node_info(info)
 
     def _save_node_info(self, info=None):
         try:
@@ -320,10 +394,46 @@ class MeshCoreAdapter:
             os.makedirs(self.storage_path, exist_ok=True)
             with open(path, "w") as f:
                 _json.dump({"public_key": pubkey}, f)
+            freq = info.get("radio_freq", "?")
+            bw   = info.get("radio_bw",   "?")
+            sf   = info.get("radio_sf",   "?")
+            cr   = info.get("radio_cr",   "?")
+            print(f"[meshcore_adapter] radio: {freq} MHz  BW={bw}  SF={sf}  CR={cr}")
             print(f"[meshcore_adapter] node pubkey: {pubkey}")
             print(f"[meshcore_adapter] node info saved: mc:{pubkey[:8]}")
         except Exception as e:
             print(f"[meshcore_adapter] could not save node info: {e}")
+
+    async def _check_radio_config(self, info):
+        """Returns True if set_radio was called, False if no change needed."""
+        if not info or self._radio_freq is None:
+            return False
+        cur_freq = info.get("radio_freq")
+        cur_bw   = info.get("radio_bw")
+        cur_sf   = info.get("radio_sf")
+        cur_cr   = info.get("radio_cr")
+        fw_ver   = info.get("fw ver", 0) or 0
+        need = (
+            (self._radio_freq is not None and cur_freq != self._radio_freq) or
+            (self._radio_bw   is not None and cur_bw   != self._radio_bw)   or
+            (self._radio_sf   is not None and cur_sf   != self._radio_sf)   or
+            (self._radio_cr   is not None and cur_cr   != self._radio_cr)
+        )
+        if not need:
+            print(f"[meshcore_adapter] radio config correct, no change needed")
+            return False
+        repeat_arg = True if fw_ver >= 9 else None
+        print(f"[meshcore_adapter] radio mismatch — setting {self._radio_freq} MHz / BW{self._radio_bw} / SF{self._radio_sf} / CR{self._radio_cr} / repeat={repeat_arg}")
+        try:
+            result = await self._mc.commands.set_radio(
+                self._radio_freq, self._radio_bw, self._radio_sf, self._radio_cr,
+                repeat=repeat_arg,
+            )
+            print(f"[meshcore_adapter] set_radio result: {result}")
+            return True
+        except Exception as e:
+            print(f"[meshcore_adapter] set_radio failed: {e}")
+            return False
 
     # =====================================================
     # GPS LOCATION
