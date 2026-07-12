@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""
+Raw MeshCore CLI — connects to the device in CLI mode (before APP_START)
+so firmware text commands work. Use to set persistent firmware variables.
+
+Usage:
+    ./scripts/meshcore_cli [port]
+
+Example:
+    ./scripts/meshcore_cli /dev/meshcore0
+    > get agc.reset.interval
+    > set agc.reset.interval 4
+    > Ctrl-C or 'exit' to quit
+
+NodeBot must be stopped before running this.
+"""
+
+import sys
+import threading
+import serial
+import configparser
+from pathlib import Path
+
+
+def load_port():
+    cfg = configparser.ConfigParser()
+    cfg.read(Path(__file__).parent.parent / "config.ini")
+    if "meshcore" in cfg:
+        return cfg["meshcore"].get("port", "/dev/meshcore0")
+    return "/dev/meshcore0"
+
+
+def main():
+    port = sys.argv[1] if len(sys.argv) > 1 else load_port()
+
+    try:
+        ser = serial.Serial(port, 115200, timeout=0.1,
+                            dsrdtr=False, rtscts=False)
+    except serial.SerialException as e:
+        sys.exit(f"Cannot open {port}: {e}\nIs NodeBot stopped? (sudo systemctl stop nodebot)")
+
+    # Pulse DTR/RTS to reboot the device into a clean CLI state.
+    import time
+    ser.dtr = True
+    ser.rts = True
+    time.sleep(0.1)
+    ser.rts = False
+    time.sleep(2.5)          # wait for boot
+
+    print(f"Connected to {port} in CLI mode (companion protocol NOT started)")
+    print("Type firmware commands, e.g.:  get agc.reset.interval")
+    print("                               set agc.reset.interval 4")
+    print("Ctrl-C or type 'exit' to quit.\n")
+
+    # Background thread: print anything the device sends
+    stop = threading.Event()
+
+    def reader():
+        buf = b""
+        while not stop.is_set():
+            chunk = ser.read(256)
+            if chunk:
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", "ignore").rstrip()
+                    if text:
+                        print(f"  < {text}")
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+
+    try:
+        while True:
+            try:
+                cmd = input("> ").strip()
+            except EOFError:
+                break
+            if cmd.lower() in ("exit", "quit"):
+                break
+            if cmd:
+                ser.write((cmd + "\r\n").encode())
+                import time; time.sleep(0.3)   # let response arrive before next prompt
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        ser.close()
+        print("\nDisconnected.")
+
+
+if __name__ == "__main__":
+    main()

@@ -288,6 +288,9 @@ Your device has a generic USB serial number (common on CP2102 clones — serial 
 **Meshtastic adapter keeps rebooting in a loop**
 NodeBot writes LoRa config on connect and saves the applied values to `~/.nodebot/lxmf_storage/meshtastic_lora.json`. On subsequent starts it compares the saved state and skips the write if nothing changed. If the loop persists, delete that file and NodeBot will rewrite it cleanly on next start.
 
+**MeshCore misses incoming messages — radio goes deaf silently**
+The SX126x radio chip can lock up its AGC circuit when no transmissions have occurred for a period of time, causing the radio to stop receiving RF packets entirely. The firmware and serial connection both appear healthy — no errors are logged — but channel messages are silently lost. NodeBot sends a zero-hop advert every 8 minutes as a TX cycle to prevent AGC lockup. The firmware's built-in `agc.reset.interval` setting is only available on Repeater/Room Server firmware — it is not present in Companion Radio firmware (see [docs/radio_settings/meshcore.md](docs/radio_settings/meshcore.md) for details).
+
 **MeshCore stops responding after unplugging and replugging**
 NodeBot detects the dropped connection and reconnects automatically with exponential backoff (up to 5 minutes). Watch the journal for `[meshcore_adapter] connection error` and `retrying in Xs` lines. If no retry messages appear, check that the `/dev/meshcore0` symlink still points to the correct port (`ls -la /dev/meshcore0`).
 

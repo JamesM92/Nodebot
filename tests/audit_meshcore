@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""
+MeshCore companion protocol audit.
+
+Connects directly to the MeshCore device (bypassing NodeBot) and runs
+a series of protocol checks. Use this to verify the device behaves
+correctly and that NodeBot's adapter assumptions hold.
+
+Usage:
+    ./scripts/audit_meshcore [--port /dev/meshcore0] [--baud 115200]
+
+Reads port/baud from config.ini [meshcore] section if not supplied.
+"""
+
+import asyncio
+import argparse
+import configparser
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+
+try:
+    from meshcore import MeshCore
+    from meshcore.serial_cx import SerialConnection
+    from meshcore.events import EventType, Event
+except ImportError:
+    sys.exit("meshcore library not found — run from project root with .venv active:\n"
+             "  .venv/bin/python scripts/audit_meshcore")
+
+# ── terminal colours ─────────────────────────────────────────────────────────
+
+G = "\033[32m"; R = "\033[31m"; Y = "\033[33m"; C = "\033[36m"; Z = "\033[0m"
+PASS = f"{G}PASS{Z}"; FAIL = f"{R}FAIL{Z}"; SKIP = f"{Y}SKIP{Z}"; INFO = f"{C}INFO{Z}"
+
+_results: list[tuple[str, bool | None]] = []
+
+def _check(label: str, ok: bool, detail: str = "") -> bool:
+    tag  = PASS if ok else FAIL
+    line = f"  [{tag}] {label}"
+    if detail:
+        line += f"  ({detail})"
+    print(line)
+    _results.append((label, ok))
+    return ok
+
+def _info(label: str, value: str = "") -> None:
+    print(f"  [{INFO}] {label}" + (f": {value}" if value else ""))
+
+def _skip(label: str, reason: str = "") -> None:
+    print(f"  [{SKIP}] {label}" + (f" — {reason}" if reason else ""))
+    _results.append((label, None))
+
+def _head(title: str) -> None:
+    print(f"\n{title}")
+    print("  " + "─" * (len(title) - 2))
+
+
+# ── main audit ────────────────────────────────────────────────────────────────
+
+async def run(port: str, baud: int) -> None:
+    print(f"\n{'═'*58}")
+    print(f"  MeshCore protocol audit   {port} @ {baud}")
+    print(f"{'═'*58}")
+
+    mc: MeshCore | None = None
+
+    # ── 1. connection ─────────────────────────────────────────────────────────
+    _head("1. Connection")
+    try:
+        cx  = SerialConnection(port, baud)
+        mc  = MeshCore(cx, auto_reconnect=False)
+        mc.set_decrypt_channel_logs(True)
+        res = await mc.connect()
+        if res is None or res.type == EventType.ERROR:
+            _check("APP_START → SELF_INFO", False, "no response")
+            print("\n  Cannot continue — check port and that NodeBot is not running.")
+            return
+        si = res.payload
+        _check("APP_START → SELF_INFO", True)
+        _info("Node name",   si.get("name", "?"))
+        _info("Public key",  si.get("public_key", "?")[:12] + "…")
+        _info("adv_type",    str(si.get("adv_type", "?")))
+        _info("Radio",       f"{si.get('radio_freq','?')} MHz  "
+                             f"BW={si.get('radio_bw','?')} kHz  "
+                             f"SF={si.get('radio_sf','?')}  "
+                             f"CR=4/{si.get('radio_cr','?')}")
+        _info("TX power",    f"{si.get('tx_power','?')} dBm  "
+                             f"(max {si.get('max_tx_power','?')} dBm)")
+    except Exception as exc:
+        _check("APP_START → SELF_INFO", False, str(exc))
+        print("\n  Cannot continue.")
+        return
+
+    # ── 2. startup commands ───────────────────────────────────────────────────
+    _head("2. Startup commands")
+
+    try:
+        r = await mc.commands.send_device_query()
+        _check("send_device_query → DEVICE_INFO",
+               r is not None and r.type == EventType.DEVICE_INFO)
+    except Exception as exc:
+        _check("send_device_query", False, str(exc))
+
+    try:
+        r = await mc.commands.set_time(int(time.time()))
+        _check("set_time → OK", r is not None and r.type == EventType.OK)
+    except Exception as exc:
+        _check("set_time", False, str(exc))
+
+    # ── 3. contacts ───────────────────────────────────────────────────────────
+    _head("3. Contacts")
+    contacts: list[dict] = []
+    try:
+        await mc.ensure_contacts()
+        # mc.contacts is a dict keyed by public_key — extract values
+        raw = mc.contacts
+        contacts = list(raw.values()) if isinstance(raw, dict) else list(raw)
+        _check("ensure_contacts", True, f"{len(contacts)} loaded")
+    except Exception as exc:
+        _check("ensure_contacts", False, str(exc))
+
+    direct = [c for c in contacts if c.get("out_path_len", -1) not in (-1, 255)]
+    flood  = [c for c in contacts if c.get("out_path_len", -1) in     (-1, 255)]
+    _info("Known direct path", str(len(direct)))
+    _info("Flood / unknown",   str(len(flood)))
+
+    # ── 4. channels ───────────────────────────────────────────────────────────
+    _head("4. Channels")
+    configured: list[int] = []
+    for idx in range(8):
+        try:
+            r = await mc.commands.get_channel(idx)
+            if r is not None and r.type == EventType.CHANNEL_INFO:
+                name = r.payload.get("name", "?")
+                configured.append(idx)
+                _info(f"Channel {idx}", f'"{name}"')
+        except Exception:
+            pass
+    _check("Channel query (slots 0-7)", True,
+           f"{len(configured)} configured: {configured if configured else 'none'}")
+
+    # ── 5. queue drain ────────────────────────────────────────────────────────
+    _head("5. Queue drain")
+    drained = 0
+    try:
+        for _ in range(300):
+            r = await mc.commands.get_msg(timeout=2.0)
+            if r.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                break
+            drained += 1
+        _check("Drain to NO_MORE_MSGS", True, f"{drained} messages drained")
+        if drained > 10:
+            print(f"  [{Y}WARN{Z}] Many queued messages — possible table pressure from prior session")
+    except Exception as exc:
+        _check("Queue drain", False, str(exc))
+
+    # ── 6. adverts ────────────────────────────────────────────────────────────
+    _head("6. Advert sends")
+    try:
+        r = await mc.commands.send_advert(flood=False)
+        _check("send_advert(flood=False) → zero-hop → OK",
+               r is not None and r.type == EventType.OK)
+    except Exception as exc:
+        _check("send_advert(flood=False)", False, str(exc))
+
+    try:
+        r = await mc.commands.send_advert(flood=True)
+        _check("send_advert(flood=True)  → flood   → OK",
+               r is not None and r.type == EventType.OK)
+    except Exception as exc:
+        _check("send_advert(flood=True)", False, str(exc))
+
+    # ── 7. channel send ───────────────────────────────────────────────────────
+    _head("7. Channel send")
+    if configured:
+        ch = configured[0]
+        try:
+            r = await mc.commands.send_chan_msg(ch, "[audit]")
+            ok = r is not None and r.type == EventType.OK
+            _check(f"send_chan_msg(ch{ch}) → OK",
+                   ok, "" if ok else f"got {r.type.name if r else 'None'}")
+        except Exception as exc:
+            _check("send_chan_msg", False, str(exc))
+    else:
+        _skip("send_chan_msg", "no channels configured")
+
+    # ── 8. DM routing — reset_path forces flood ───────────────────────────────
+    _head("8. DM routing  (reset_path → flood)")
+    test_contact = None
+    if contacts:
+        # Prefer a contact with a known direct path to show the before/after
+        for c in contacts:
+            if c.get("out_path_len", -1) not in (-1, 255):
+                test_contact = c
+                break
+        if test_contact is None:
+            test_contact = contacts[0]
+
+    if test_contact:
+        cname      = test_contact.get("adv_name", "?")
+        path_len   = test_contact.get("out_path_len", "?")
+        _info("Test contact", f"{cname}  out_path_len={path_len}")
+
+        # Send WITHOUT reset — expect direct (type=0) if path known, flood (type=1) if not
+        try:
+            r = await mc.commands.send_msg(test_contact, "[audit-direct]")
+            if r is not None and r.type == EventType.MSG_SENT:
+                rf = r.payload.get("type", "?")
+                label = "direct" if rf == 0 else "flood"
+                _info("send_msg (no reset_path)", f"route={label} (type={rf})")
+            elif r is not None and r.type == EventType.ERROR:
+                err = r.payload.get("code_string", r.payload)
+                print(f"  [{Y}WARN{Z}] send_msg without reset_path → {err}")
+        except Exception as exc:
+            print(f"  [{Y}WARN{Z}] send_msg without reset_path raised: {exc}")
+
+        # reset_path → OK
+        try:
+            r = await mc.commands.reset_path(test_contact)
+            rp_ok = r is not None and r.type == EventType.OK
+            _check("reset_path → OK", rp_ok)
+        except Exception as exc:
+            _check("reset_path", False, str(exc))
+            rp_ok = False
+
+        # send_msg after reset — must be flood (type=1)
+        if rp_ok:
+            try:
+                r = await mc.commands.send_msg(test_contact, "[audit-flood]")
+                if r is not None and r.type == EventType.MSG_SENT:
+                    rf = r.payload.get("type", "?")
+                    _check("send_msg after reset_path → flood (type=1)", rf == 1,
+                           f"got type={rf}")
+                else:
+                    err = r.payload.get("code_string", r.payload) if r else "None"
+                    _check("send_msg after reset_path → MSG_SENT", False, str(err))
+            except Exception as exc:
+                _check("send_msg after reset_path", False, str(exc))
+    else:
+        _skip("DM routing check", "no contacts loaded")
+
+    # ── 9. interactive — DM receive + immediate reply ─────────────────────────
+    _head("9. Interactive: DM receive + immediate reply")
+    print("  Send a DM to this node from your phone/client now.")
+    print("  The script replies immediately and checks for TABLE_FULL.\n"
+          "  Waiting 60 seconds…\n")
+
+    dm_event: Event | None = None
+    dm_fut: asyncio.Future[Event] = asyncio.get_event_loop().create_future()
+
+    async def on_dm(event: Event) -> None:
+        if not dm_fut.done():
+            dm_fut.set_result(event)
+
+    sub_dm = mc.subscribe(EventType.CONTACT_MSG_RECV, on_dm)
+    await mc.start_auto_message_fetching()
+
+    try:
+        dm_event = await asyncio.wait_for(dm_fut, timeout=60.0)
+    except asyncio.TimeoutError:
+        _skip("DM received", "no DM within 60 seconds")
+
+    mc.unsubscribe(sub_dm)
+
+    if dm_event:
+        sender = dm_event.payload.get("pubkey_prefix", "?")
+        text   = dm_event.payload.get("text", "?")
+        _check("DM received", True, f"{sender}: {text!r}")
+
+        contact = mc.get_contact_by_key_prefix(sender)
+        if contact is None:
+            _skip("DM reply", "sender not in contacts")
+        else:
+            try:
+                await mc.commands.reset_path(contact)
+                r = await mc.commands.send_msg(contact, "audit reply OK")
+                if r is not None and r.type == EventType.MSG_SENT:
+                    rf = r.payload.get("type", "?")
+                    _check("Immediate reply → MSG_SENT (not TABLE_FULL)", True)
+                    _check("Reply sent as flood (type=1)", rf == 1, f"type={rf}")
+                else:
+                    err = r.payload.get("code_string", r.payload) if r else "None"
+                    _check("Immediate reply → MSG_SENT (not TABLE_FULL)", False, str(err))
+            except Exception as exc:
+                _check("Immediate reply", False, str(exc))
+
+    # ── 10. RF monitoring ─────────────────────────────────────────────────────
+    _head("10. RF monitoring  (10 seconds)")
+    log_count = 0
+    decrypt_count = 0
+
+    async def on_rf(event: Event) -> None:
+        nonlocal log_count, decrypt_count
+        log_count += 1
+        p = event.payload
+        if p.get("text") or p.get("message") or p.get("typename") == "GRP_TXT":
+            decrypt_count += 1
+
+    sub_rf = mc.subscribe(EventType.RX_LOG_DATA, on_rf)
+    await asyncio.sleep(10)
+    mc.unsubscribe(sub_rf)
+
+    if log_count:
+        _check("LOG_DATA events received", True,
+               f"{log_count} packets  {decrypt_count} decrypted")
+    else:
+        print(f"  [{Y}WARN{Z}] No LOG_DATA in 10 seconds — quiet channel, or AGC lockup?")
+
+    # ── summary ───────────────────────────────────────────────────────────────
+    await mc.disconnect()
+
+    print(f"\n{'═'*58}")
+    print("  Summary")
+    print(f"{'═'*58}")
+    passed  = sum(1 for _, r in _results if r is True)
+    failed  = sum(1 for _, r in _results if r is False)
+    skipped = sum(1 for _, r in _results if r is None)
+    for label, r in _results:
+        if r is True:
+            print(f"  [{PASS}] {label}")
+        elif r is False:
+            print(f"  [{FAIL}] {label}")
+        else:
+            print(f"  [{SKIP}] {label}")
+    print(f"\n  {G}{passed} passed{Z}  {R}{failed} failed{Z}  {Y}{skipped} skipped{Z}\n")
+
+
+# ── entry point ───────────────────────────────────────────────────────────────
+
+def _cfg_port() -> tuple[str | None, int]:
+    cfg = configparser.ConfigParser()
+    cfg.read(ROOT / "config.ini")
+    if "meshcore" in cfg:
+        return cfg["meshcore"].get("port"), int(cfg["meshcore"].get("baud", "115200"))
+    return None, 115200
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="MeshCore protocol audit")
+    ap.add_argument("--port", help="Serial port (default: from config.ini)")
+    ap.add_argument("--baud", type=int, help="Baud rate (default: from config.ini or 115200)")
+    args = ap.parse_args()
+
+    cfg_port, cfg_baud = _cfg_port()
+    port = args.port or cfg_port or "/dev/meshcore0"
+    baud = args.baud or cfg_baud
+
+    asyncio.run(run(port, baud))

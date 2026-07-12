@@ -1,9 +1,51 @@
 # MeshCore Regional Radio Settings
 
+---
+
+## AGC Reset and Radio Deafness (Serial Companion Mode)
+
+### The problem
+
+The SX126x radio chip used by MeshCore devices (Heltec V3, etc.) has an AGC (Automatic Gain Control) circuit that can lock up when the radio has not transmitted for an extended period, or after a strong out-of-band RF signal hits the receiver. Once locked, the radio appears to the firmware to be fully functional — serial commands still work, the companion app still connects — but the radio silently stops receiving RF packets. Incoming channel messages and node announcements are lost with no error logged anywhere.
+
+This affects **serial companion mode specifically**. BLE companions are immune because the phone disconnects and reconnects frequently (every time it sleeps), and each reconnect triggers a firmware radio reinitialisation. A serial companion stays connected indefinitely, so no natural reinit ever occurs.
+
+### Symptoms of AGC lockup
+
+- Bot receives messages from nearby nodes (strong signal) but misses messages from nodes further away
+- Channel goes silent for minutes at a time then resumes
+- `rflog` shows undecrypted packets from other channels, but no traffic on Public or your named channels
+- No errors logged — the firmware and serial connection both appear healthy
+- Reconnecting the serial cable (or restarting the companion app) immediately fixes it
+
+### Fix A: `agc.reset.interval` (Repeater / Room Server firmware only)
+
+> **This setting only exists in Repeater and Room Server firmware. It is NOT present in Companion Radio firmware.** If your device runs Companion Radio firmware (i.e. it connects to NodeBot over USB as a companion), use Fix B below instead.
+
+The MeshCore Repeater/Room Server firmware has a built-in AGC reset mechanism:
+
+```
+set agc.reset.interval 4
+```
+
+This tells the firmware to run a full SX126x calibration cycle every ~16 seconds internally, without any companion involvement or RF transmissions. **Set this once via a UART serial terminal or the MeshCore BLE app CLI (for supported hardware), and it persists across reboots.**
+
+The `set_custom_var` companion API cannot write this setting — it is firmware CLI config and is rejected with an error on Companion Radio firmware.
+
+### Fix B: NodeBot TX keepalive (Companion Radio firmware)
+
+Since `agc.reset.interval` is not available on Companion Radio firmware, NodeBot sends a zero-hop advert every 8 minutes as a fallback. Any transmission forces the SX126x through a TX → RX state transition, which resets the analog frontend and clears a stuck AGC. This adds minimal RF traffic (one short zero-hop packet every 8 minutes) and works reliably as a workaround on Companion Radio firmware.
+
+The keepalive is active by default and requires no configuration. It is implemented in `nodebot/transports/meshcore_adapter.py` (`_AGC_TX_SECS = 8 * 60`).
+
+---
+
 Sources:
-- https://docs.meshcore.io/cli_commands (CLI radio commands)
+- https://github.com/meshcore-dev/MeshCore/issues/1716 (AGC lockup investigation)
+- https://github.com/meshcore-dev/MeshCore/pull/1743 (AGC fix merged in v1.13)
+- https://github.com/meshcore-dev/MeshCore/issues/1950 (agc.reset.interval default discussion)
+- https://docs.meshcore.io/faq/ (MeshCore FAQ — repeater deafness)
 - https://github.com/ripplebiz/MeshCore/blob/main/docs/companion_protocol.md (PACKET_SELF_INFO radio fields)
-- MeshCore CLI defaults and community-established regional norms
 
 ---
 
