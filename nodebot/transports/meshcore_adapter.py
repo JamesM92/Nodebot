@@ -737,11 +737,6 @@ class MeshCoreAdapter:
                 print(f"[meshcore_adapter] no contact for {pubkey_prefix}, dropping")
                 return False
 
-            # Force flood path so reply is fire-and-forget (no ack table entry).
-            # Direct-path replies accumulate expected_ack_table entries faster than
-            # the recipient can ACK them, causing TABLE_FULL within milliseconds.
-            await self._mc.commands.reset_path(contact)
-
             result = await self._mc.commands.send_msg_with_retry(contact, content)
             if result is None or result.type == EventType.ERROR:
                 print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {result.payload if result else 'no ack'}")
