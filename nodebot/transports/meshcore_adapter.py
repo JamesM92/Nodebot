@@ -737,9 +737,14 @@ class MeshCoreAdapter:
                 print(f"[meshcore_adapter] no contact for {pubkey_prefix}, dropping")
                 return False
 
-            # Retry with delays: TABLE_FULL means the firmware's 16-slot packet pool
-            # is exhausted by in-flight channel traffic. Each delay gives the radio
-            # ~one airtime to finish a TX and free a slot (SF7/BW62.5 ≈ 300-500ms).
+            # Diagnostic: log outbound queue depth before send
+            try:
+                stats = await self._mc.commands.get_stats_core()
+                q = stats.payload.get("outbound_queue", "?") if stats and stats.payload else "?"
+                print(f"[meshcore_adapter] pre-send stats: outbound_queue={q}")
+            except Exception:
+                pass
+
             _DELAYS = [0.4, 0.8, 1.5, 3.0, 5.0]
             for attempt, delay in enumerate([0] + _DELAYS):
                 if delay:
