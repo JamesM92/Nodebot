@@ -72,8 +72,6 @@ class MeshCoreAdapter:
         self._last_gps_lat = None
         self._last_gps_lon = None
 
-        self._radio_keepalive_interval = int(cfg.get("meshcore", "radio_keepalive_interval", fallback="300"))
-
         print(f"[meshcore_adapter] port={self.port} baud={self.baudrate} gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
 
     # =====================================================
@@ -199,17 +197,13 @@ class MeshCoreAdapter:
                     #                true always). No keepalive needed.
                     # Every 3 min  : active ping via get_msg() when no organic events;
                     #                3 failures force reconnect.
-                    # Every 5 min  : zero-hop advert keepalive — forces TX→RX cycle
-                    #                to recover SX126x AGC deafness (configurable).
                     # Every 25 min : passive watchdog — reconnect if totally dead.
                     _POLL_SECS        = 5.0
                     _PING_SECS        = 3 * 60
                     _PING_FAIL_MAX    = 3
                     _WATCHDOG_SECS    = 25 * 60
-                    _KEEPALIVE_SECS   = self._radio_keepalive_interval
                     _last_poll        = asyncio.get_event_loop().time()
                     _last_ping        = asyncio.get_event_loop().time()
-                    _last_keepalive   = asyncio.get_event_loop().time()
                     _ping_failures    = 0
                     self._last_rx_ts  = time.time()  # seed so first window is fair
                     while self.running:
@@ -252,15 +246,6 @@ class MeshCoreAdapter:
                                         raise RuntimeError(
                                             f"Device unresponsive after {_ping_failures} consecutive ping failures — forcing reconnect"
                                         )
-                        # Periodic radio keepalive: send a zero-hop advert to force
-                        # the radio through a TX→RX cycle.  The RX restart after TX
-                        # resets the SX126x AGC circuit, clearing deafness from
-                        # interference.  Pattern from agessaman/meshcore-bot.
-                        if _KEEPALIVE_SECS > 0 and now - _last_keepalive >= _KEEPALIVE_SECS:
-                            _last_keepalive = now
-                            print("[meshcore_adapter] radio keepalive: sending zero-hop advert")
-                            await self._announce_async(flood=False)
-
                         # Passive watchdog: checked every loop iteration so it fires
                         # as soon as the threshold passes (no off-by-interval gap).
                         elapsed = time.time() - self._last_rx_ts
@@ -1001,25 +986,12 @@ class MeshCoreAdapter:
                 print(f"[meshcore_adapter] no contact for {pubkey_prefix}, dropping")
                 return False
 
-            # Reset path to flood before every send.  Direct-path sends create an
-            # expected_ack_table entry that stays until the recipient ACKs back.
-            # Flood sends are fire-and-forget — no table entry, TABLE_FULL impossible.
-            try:
-                await self._mc.commands.reset_path(contact)
-            except Exception:
-                pass
-
-            for attempt in range(2):
-                result = await self._mc.commands.send_msg(contact, content)
-                if result.type != EventType.ERROR:
-                    print(f"[meshcore_adapter] sent to {pubkey_prefix}")
-                    return True
-                err = result.payload.get("code_string") or result.payload
-                if err != "ERR_CODE_TABLE_FULL" or attempt:
-                    print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {err}")
-                    return False
-                await asyncio.sleep(0.2)
-            return False
+            result = await self._mc.commands.send_msg_with_retry(contact, content)
+            if result.type == EventType.ERROR:
+                print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {result.payload}")
+                return False
+            print(f"[meshcore_adapter] sent to {pubkey_prefix}")
+            return True
 
         except Exception as e:
             print(f"[meshcore_adapter] async send error: {e}")
@@ -1040,7 +1012,7 @@ class MeshCoreAdapter:
             return
         self._last_periodic_announce = now
         future = asyncio.run_coroutine_threadsafe(
-            self._announce_async(flood=True),
+            self._announce_async(),
             self._loop
         )
         try:
@@ -1048,9 +1020,9 @@ class MeshCoreAdapter:
         except Exception as e:
             print(f"[meshcore_adapter] announce error: {e}")
 
-    async def _announce_async(self, flood=False):
+    async def _announce_async(self):
         try:
-            await self._mc.commands.send_advert(flood=flood)
+            await self._mc.commands.send_advert()
             print("[meshcore_adapter] announced on network")
         except Exception as e:
             print(f"[meshcore_adapter] announce failed: {e}")
