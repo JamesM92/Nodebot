@@ -737,12 +737,25 @@ class MeshCoreAdapter:
                 print(f"[meshcore_adapter] no contact for {pubkey_prefix}, dropping")
                 return False
 
-            result = await self._mc.commands.send_msg_with_retry(contact, content)
-            if result is None or result.type == EventType.ERROR:
-                print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {result.payload if result else 'no ack'}")
-                return False
-            print(f"[meshcore_adapter] sent to {pubkey_prefix}")
-            return True
+            # Retry with delays: TABLE_FULL means the firmware's 16-slot packet pool
+            # is exhausted by in-flight channel traffic. Each delay gives the radio
+            # ~one airtime to finish a TX and free a slot (SF7/BW62.5 ≈ 300-500ms).
+            _DELAYS = [0.4, 0.8, 1.5, 3.0, 5.0]
+            for attempt, delay in enumerate([0] + _DELAYS):
+                if delay:
+                    await asyncio.sleep(delay)
+                result = await self._mc.commands.send_msg_with_retry(contact, content)
+                if result is not None and result.type != EventType.ERROR:
+                    print(f"[meshcore_adapter] sent to {pubkey_prefix} (attempt {attempt + 1})")
+                    return True
+                err = (result.payload or {}).get("code_string") if result else "no ack"
+                if err != "ERR_CODE_TABLE_FULL":
+                    print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {err}")
+                    return False
+                next_delay = _DELAYS[attempt] if attempt < len(_DELAYS) else "—"
+                print(f"[meshcore_adapter] TABLE_FULL attempt {attempt + 1}/{len(_DELAYS) + 1}, retry in {next_delay}s")
+            print(f"[meshcore_adapter] send failed to {pubkey_prefix}: TABLE_FULL after all retries")
+            return False
 
         except Exception as e:
             print(f"[meshcore_adapter] async send error: {e}")
