@@ -12,7 +12,8 @@ from .. import logger
 CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
 CHAN_BUFFER_MAX = 500
 
-_AGC_TX_SECS         = 8 * 60   # send_advert() to reset SX126x AGC lockup
+_AGC_TX_SECS         = 3 * 60   # send_advert() to reset SX126x AGC lockup (3 min baseline)
+_LOG_DATA_STALE_SECS = 2 * 60   # proactive AGC reset if no LOG_DATA events for 2 min
 _PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
 _WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
 _PERIODIC_ANN_SECS   = 12 * 3600
@@ -65,6 +66,7 @@ class MeshCoreAdapter:
         self._pool_tainted        = False  # TABLE_FULL exhausted retries — firmware reboot needed
         self._ready               = None   # asyncio.Event; set when startup complete, cleared on reconnect
         self._last_rf_event = time.time()
+        self._last_log_data = time.time()
 
         self._chan_buffer      = collections.deque(maxlen=CHAN_BUFFER_MAX)
         self._chan_clients     = set()
@@ -247,6 +249,7 @@ class MeshCoreAdapter:
                     _POLL_SECS = 5.0
                     _last_poll = asyncio.get_event_loop().time()
                     self._last_rf_event = time.time()
+                    self._last_log_data = time.time()
 
                     while self.running:
                         await asyncio.sleep(1)
@@ -266,6 +269,19 @@ class MeshCoreAdapter:
                             _last_agc = now
                             try:
                                 await self._mc.commands.send_advert(flood=False)
+                            except Exception:
+                                pass
+
+                        # Proactive AGC reset — if no LOG_DATA events for 2 min the
+                        # SX126x analog frontend has likely latched onto interference.
+                        # Fire an extra advert immediately rather than waiting for the
+                        # 3-min baseline keepalive timer.
+                        if (now - self._last_log_data >= _LOG_DATA_STALE_SECS
+                                and now - _last_agc >= 60):
+                            _last_agc = now
+                            try:
+                                await self._mc.commands.send_advert(flood=False)
+                                print("[meshcore_adapter] AGC reset: no rflog events for 2+ min")
                             except Exception:
                                 pass
 
@@ -727,6 +743,7 @@ class MeshCoreAdapter:
             p = event.payload
 
             self._last_rf_event = time.time()
+            self._last_log_data = time.time()
 
             if p.get("payload_typename") != "GRP_TXT":
                 return
