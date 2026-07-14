@@ -13,7 +13,7 @@ CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
 CHAN_BUFFER_MAX = 500
 
 _AGC_TX_SECS         = 3 * 60   # send_advert() to reset SX126x AGC lockup (3 min baseline)
-_LOG_DATA_STALE_SECS = 90       # proactive AGC reset if no LOG_DATA events for 90 s
+_LOG_DATA_STALE_SECS = 45       # proactive AGC reset if no LOG_DATA events for 45 s
 _AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive failed TX resets
 _PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
 _WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
@@ -282,7 +282,7 @@ class MeshCoreAdapter:
                         # _AGC_DEAD_COUNT consecutive failures, reboot the firmware
                         # for a guaranteed full SX126x power-on calibration.
                         if (now - self._last_log_data >= _LOG_DATA_STALE_SECS
-                                and now - _last_agc >= 60):
+                                and now - _last_agc >= 30):
                             _last_agc = now
                             self._agc_reset_count += 1
                             if self._agc_reset_count >= _AGC_DEAD_COUNT:
