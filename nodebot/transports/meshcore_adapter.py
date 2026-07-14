@@ -13,7 +13,8 @@ CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
 CHAN_BUFFER_MAX = 500
 
 _AGC_TX_SECS         = 3 * 60   # send_advert() to reset SX126x AGC lockup (3 min baseline)
-_LOG_DATA_STALE_SECS = 45       # proactive AGC reset if no LOG_DATA events for 45 s
+_LOG_DATA_STALE_SECS = 3 * 60   # proactive AGC reset if no LOG_DATA events for 3 min
+                                 # (firmware does its own 30s reset; this is a fallback)
 _AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive failed TX resets
 _PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
 _WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
