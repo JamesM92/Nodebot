@@ -9,24 +9,45 @@ import time
 from .. import logger
 
 
-CHAN_SOCK_PATH = "/tmp/nodebot_chan.sock"
+CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
 CHAN_BUFFER_MAX = 500
+
+_AGC_TX_SECS         = 8 * 60   # send_advert() to reset SX126x AGC lockup
+_PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
+_WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
+_PERIODIC_ANN_SECS   = 12 * 3600
+
+# Delays between TABLE_FULL retries (seconds before each attempt).
+#
+# TABLE_FULL means createDatagram() returned NULL — Dispatcher pool exhausted.
+# With rx_delay_base=0 and no-flood announce, the rx_queue stays empty, yet
+# pool exhaustion still occurs with queue_len=0 (getFreeCount() is not exposed
+# via serial, so the true occupant of all 16 slots is unknown).
+#
+# Strategy: 4 fast attempts to catch any transient gap, then give up and
+# reconnect.  A firmware reboot clears all pool state; the message is
+# re-queued and retried after the clean reconnect (see _send_worker).
+_SEND_DELAYS = [0.1, 0.3, 0.8, 2.0]
 
 
 class MeshCoreAdapter:
     """
     MeshCore transport adapter for NodeBot.
 
-    Connects to a MeshCore radio over serial, subscribes to incoming private
-    messages, and routes them through the NodeBot engine. Replies are sent back
-    via the MeshCore library's async send_msg API.
-
-    The MeshCore library is fully async. This adapter runs its event loop on a
-    dedicated thread and bridges the sync engine callback back into that loop
-    with asyncio.run_coroutine_threadsafe().
-
-    Public channel messages are kept in a RAM ring buffer and served to
-    chanlisten clients over a Unix socket (/tmp/nodebot_chan.sock).
+    Architecture:
+    - Single async event loop on a dedicated thread.
+    - Inbound DMs trigger engine.handle_message() in an executor (so the engine's
+      sync work doesn't block the event loop), which calls _send_reply() sync.
+    - _send_reply() is NON-BLOCKING: it puts the outbound job on an asyncio.Queue
+      and returns immediately.  No future.result() — this eliminates the concurrent-
+      coroutine bug where a 10 s timeout caused a second retry loop to spawn.
+    - A single _send_worker() coroutine drains the queue one job at a time, so
+      only one outbound attempt runs at a time.
+    - Outbound uses plain send_msg() (one firmware attempt per retry), not
+      send_msg_with_retry(), which did 2 rapid-fire internal attempts before
+      returning.  Our own retry loop applies increasing delays between attempts.
+    - send_msg() accepts a raw hex pubkey string — no contact-table lookup
+      required, so replies work even for contacts not previously announced.
     """
 
     def __init__(self, storage_path, engine):
@@ -34,16 +55,22 @@ class MeshCoreAdapter:
         self.storage_path = storage_path
         self.engine = engine
 
-        self._mc = None
-        self._loop = None
+        self._mc    = None
+        self._loop  = None
         self._thread = None
         self.running = False
 
-        self._chan_buffer = collections.deque(maxlen=CHAN_BUFFER_MAX)
-        self._chan_clients = set()   # asyncio.StreamWriter instances
-        self._recent_msgs = {}       # (pubkey_prefix, text) -> timestamp for DM dedup
-        self._recent_chan_msgs = {}  # (sender_ts, text[:32]) -> timestamp for channel dedup
-        self._seen_contacts = {}     # sender_id -> (rounded_lat, rounded_lon) for announce dedup
+        self._send_queue          = None   # asyncio.Queue, created inside event loop
+        self._reconnect_requested = False  # set by _send_one to break inner loop
+        self._pool_tainted        = False  # TABLE_FULL exhausted retries — firmware reboot needed
+        self._ready               = None   # asyncio.Event; set when startup complete, cleared on reconnect
+        self._last_rf_event = time.time()
+
+        self._chan_buffer      = collections.deque(maxlen=CHAN_BUFFER_MAX)
+        self._chan_clients     = set()
+        self._recent_msgs      = {}
+        self._recent_chan_msgs = {}
+        self._seen_contacts    = {}
 
         _here = os.path.dirname(os.path.abspath(__file__))
         _config_path = os.path.join(_here, "..", "..", "config.ini")
@@ -52,8 +79,14 @@ class MeshCoreAdapter:
 
         self._node_name = cfg.get("bot", "name", fallback="NodeBot").strip()
 
-        self.port = cfg.get("meshcore", "port", fallback="/dev/meshcore0").strip()
+        self.port     = cfg.get("meshcore", "port",     fallback="/dev/meshcore0").strip()
         self.baudrate = int(cfg.get("meshcore", "baudrate", fallback="115200"))
+
+        self._radio_freq   = float(cfg.get("meshcore", "radio_freq",   fallback="915.0"))
+        self._radio_bw     = float(cfg.get("meshcore", "radio_bw",     fallback="250.0"))
+        self._radio_sf     = int(cfg.get("meshcore",   "radio_sf",     fallback="9"))
+        self._radio_cr     = int(cfg.get("meshcore",   "radio_cr",     fallback="5"))
+        self._radio_repeat = int(cfg.get("meshcore",   "radio_repeat", fallback="0"))
 
         self._gps_mode      = cfg.get("gps", "gps_mode",      fallback="disabled").strip()
         self._gps_lat       = cfg.get("gps", "gps_lat",       fallback="").strip()
@@ -62,11 +95,11 @@ class MeshCoreAdapter:
         self._gps_device    = cfg.get("gps", "gps_device",    fallback="").strip()
         self._gps_precision = int(cfg.get("gps", "gps_precision", fallback="4").strip())
 
-        # Track last coordinates pushed to the radio (rounded)
         self._last_gps_lat = None
         self._last_gps_lon = None
 
-        print(f"[meshcore_adapter] port={self.port} baud={self.baudrate} gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
+        print(f"[meshcore_adapter] port={self.port} baud={self.baudrate} "
+              f"gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
 
     # =====================================================
     # HEALTH
@@ -81,11 +114,9 @@ class MeshCoreAdapter:
     # =====================================================
 
     def start_worker(self):
-
         if self._thread and self._thread.is_alive():
             print("[meshcore_adapter] worker already running")
             return
-
         self.running = True
         self._thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._thread.start()
@@ -111,18 +142,22 @@ class MeshCoreAdapter:
         from meshcore.serial_cx import SerialConnection
         from meshcore.events import EventType, Event
 
-        server_task = asyncio.create_task(self._run_chan_server())
+        self._send_queue = asyncio.Queue()
+        self._ready      = asyncio.Event()
 
-        _retry = 0
+        server_task = asyncio.create_task(self._run_chan_server())
+        send_task   = asyncio.create_task(self._send_worker())
+
+        _retry      = 0
+        _first_boot = True
 
         try:
             while self.running:
+                self._ready.clear()   # block _send_worker until startup completes
                 try:
                     cx = SerialConnection(self.port, self.baudrate)
                     self._mc = MeshCore(cx, auto_reconnect=True, max_reconnect_attempts=0)
 
-                    # Subscribe before connect so _on_self_info fires when
-                    # send_appstart() triggers SELF_INFO during the handshake.
                     self._mc.subscribe(EventType.SELF_INFO, self._on_self_info)
 
                     conn_result = await self._mc.connect()
@@ -130,56 +165,138 @@ class MeshCoreAdapter:
                         raise RuntimeError(
                             f"MeshCore handshake timed out on {self.port} — "
                             f"device did not respond to APP_START. "
-                            f"If an rNode is also connected, check that the devices "
-                            f"are not swapped (wrong device in wrong USB port)."
+                            f"Check that the correct device is in the correct USB port."
                         )
                     print(f"[meshcore_adapter] connected to {self.port}")
-                    _retry = 0  # reset backoff on successful connect
+                    _retry = 0
 
-                    # Yield to the event loop so pending async callbacks
-                    # (_on_self_info) can run before the rest of setup.
+                    # Reboot the firmware if:
+                    #   a) first boot and firmware has been running a while
+                    #      (stale pool slots from a previous Python session), OR
+                    #   b) TABLE_FULL exhausted all retry attempts — _pool_tainted
+                    #      is set so we know the 16-slot pool needs a hard reset.
+                    # Python-side reconnect alone does NOT clear the pool; only a
+                    # firmware reboot (ESP32 reset) returns all slots to unused[].
+                    if _first_boot or self._pool_tainted:
+                        _first_boot = False
+                        self._pool_tainted = False
+                        uptime = 999
+                        try:
+                            cs = await self._mc.commands.get_stats_core()
+                            if cs and cs.payload:
+                                uptime = cs.payload.get("uptime_secs", 999)
+                        except Exception:
+                            pass
+                        if uptime > 30:
+                            print(f"[meshcore_adapter] startup: firmware uptime={uptime}s — rebooting to clear stale pool state")
+                            try:
+                                await self._mc.commands.reboot()
+                            except Exception:
+                                pass
+                            await self._mc.disconnect()
+                            self._mc = None
+                            await asyncio.sleep(8)
+                            continue
+                        else:
+                            print(f"[meshcore_adapter] startup: firmware uptime={uptime}s — pool is fresh, no reboot needed")
+
                     await asyncio.sleep(0.2)
 
                     await self._mc.ensure_contacts()
                     print(f"[meshcore_adapter] contacts loaded: {len(self._mc.contacts)}")
 
+                    await self._apply_radio_params()
+                    await self._apply_tuning_params()
                     await self._query_channels()
                     await self._set_node_name()
-                    await self._set_gps_location()
-                    await self._announce_async()
 
-                    sub = self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_message)
-                    sub_chan = self._mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_message)
-                    sub_rflog = self._mc.subscribe(EventType.RX_LOG_DATA, self._on_rf_log)
+                    sub_dm   = self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_message)
+                    sub_chan = self._mc.subscribe(EventType.CHANNEL_MSG_RECV,  self._on_channel_message)
+                    sub_rf   = self._mc.subscribe(EventType.RX_LOG_DATA,       self._on_rf_log)
 
                     await self._mc.start_auto_message_fetching()
                     print("[meshcore_adapter] listening for messages")
 
+                    # Flush pending outbound replies BEFORE announcing.
+                    # Announcing triggers PATH responses from all 83+ mesh
+                    # neighbours which saturates the 16-slot packet pool.
+                    # The pool is clean right now — send any queued replies
+                    # while we have the window.
                     if self.engine:
                         loop = asyncio.get_event_loop()
                         await loop.run_in_executor(
                             None, lambda: self.engine.flush_outbound("meshcore_adapter")
                         )
+                    await asyncio.sleep(1)   # let _send_worker drain the queue
+
+                    # GPS and announce go last — these trigger RF traffic
+                    await self._set_gps_location()
+                    await self._announce_async()
+
+                    # Startup complete — unblock _send_worker
+                    self._ready.set()
+                    print("[meshcore_adapter] ready")
 
                     gps_task = None
                     if self._gps_mode in ("gpsd", "serial", "future"):
                         gps_task = asyncio.create_task(self._gps_update_loop())
 
-                    # Idle — callbacks drive everything from here.
-                    # Every 5 seconds dispatch a synthetic MESSAGES_WAITING so
-                    # the library's fetch loop drains any channel messages the
-                    # radio queued without sending an explicit notification.
+                    _last_agc  = time.time()
+                    _last_ping = time.time()
+                    _last_ann  = time.time()
                     _POLL_SECS = 5.0
                     _last_poll = asyncio.get_event_loop().time()
+                    self._last_rf_event = time.time()
+
                     while self.running:
                         await asyncio.sleep(1)
-                        now = asyncio.get_event_loop().time()
-                        if now - _last_poll >= _POLL_SECS:
-                            _last_poll = now
+                        now      = time.time()
+                        loop_now = asyncio.get_event_loop().time()
+
+                        # Periodic MESSAGES_WAITING flush
+                        if loop_now - _last_poll >= _POLL_SECS:
+                            _last_poll = loop_now
                             if self._mc:
                                 await self._mc.dispatcher.dispatch(
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
+
+                        # AGC keepalive — zero-hop TX resets SX126x analog frontend
+                        if now - _last_agc >= _AGC_TX_SECS:
+                            _last_agc = now
+                            try:
+                                await self._mc.commands.send_advert(flood=False)
+                            except Exception:
+                                pass
+
+                        # Health probe — lightweight, doesn't compete with DM delivery
+                        if now - _last_ping >= _PING_SECS:
+                            _last_ping = now
+                            try:
+                                await self._mc.commands.get_time()
+                                self._last_rf_event = now
+                            except Exception:
+                                pass
+
+                        # Reconnect requested by _send_one (AGC lockup detected)
+                        if self._reconnect_requested:
+                            self._reconnect_requested = False
+                            print("[meshcore_adapter] reconnecting: persistent TABLE_FULL (AGC lockup suspected)")
+                            break
+
+                        # Watchdog
+                        if now - self._last_rf_event >= _WATCHDOG_SECS:
+                            print("[meshcore_adapter] watchdog: no RF events, reconnecting")
+                            break
+
+                        # Periodic presence announce (no-flood — avoids rx_queue burst)
+                        if now - _last_ann >= _PERIODIC_ANN_SECS:
+                            _last_ann = now
+                            try:
+                                await self._mc.commands.send_advert(flood=False)
+                                print("[meshcore_adapter] periodic announce (no-flood)")
+                            except Exception:
+                                pass
 
                     if gps_task:
                         gps_task.cancel()
@@ -188,11 +305,14 @@ class MeshCoreAdapter:
                         except asyncio.CancelledError:
                             pass
 
-                    self._mc.unsubscribe(sub)
+                    self._mc.unsubscribe(sub_dm)
                     self._mc.unsubscribe(sub_chan)
-                    self._mc.unsubscribe(sub_rflog)
+                    self._mc.unsubscribe(sub_rf)
                     await self._mc.disconnect()
-                    break
+                    self._mc = None
+                    if not self.running:
+                        break
+                    # watchdog or clean exit from inner loop — reconnect
 
                 except Exception as e:
                     delay = min(10 * (2 ** _retry), 300)
@@ -203,11 +323,65 @@ class MeshCoreAdapter:
                         await asyncio.sleep(delay)
 
         finally:
+            send_task.cancel()
             server_task.cancel()
-            try:
-                await server_task
-            except asyncio.CancelledError:
-                pass
+            for t in (send_task, server_task):
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+    # =====================================================
+    # RADIO PARAMS
+    # =====================================================
+
+    async def _apply_radio_params(self):
+        try:
+            from meshcore.events import EventType
+            result = await self._mc.commands.set_radio(
+                self._radio_freq, self._radio_bw,
+                self._radio_sf,   self._radio_cr,
+                repeat=self._radio_repeat,
+            )
+            if result and result.type == EventType.OK:
+                print(f"[meshcore_adapter] radio set: freq={self._radio_freq} "
+                      f"bw={self._radio_bw} sf={self._radio_sf} "
+                      f"cr={self._radio_cr} repeat={self._radio_repeat}")
+            else:
+                err = (result.payload or {}).get("code_string", "?") if result else "no response"
+                print(f"[meshcore_adapter] radio set failed: {err}")
+        except Exception as e:
+            print(f"[meshcore_adapter] radio set error: {e}")
+
+    async def _apply_tuning_params(self):
+        """
+        Set rx_delay_base=0 so flood packets bypass the rx_queue delay entirely.
+
+        Dispatcher::checkRecv() normally holds every flood-routed packet in
+        rx_queue for calcRxDelay() ms (up to 32 s) for relay timing.  With
+        relay disabled (radio_repeat=0) this wastes pool slots on waiting that
+        never leads to a retransmit.  rx_delay_base=0 short-circuits the check
+        so all flood packets call processRecvPacket() immediately, keeping the
+        pool free for outbound DM replies.
+        """
+        from meshcore.events import EventType
+        try:
+            res = await self._mc.commands.get_tuning()
+            if res and res.payload:
+                rx_dly = res.payload.get("rx_delay", 0)
+                af     = res.payload.get("airtime_factor", 0)
+                print(f"[meshcore_adapter] tuning: rx_delay={rx_dly} airtime_factor={af}")
+                if rx_dly != 0:
+                    result = await self._mc.commands.set_tuning(0, af)
+                    if result and result.type == EventType.OK:
+                        print("[meshcore_adapter] tuning: rx_delay set to 0 (rx_queue bypass enabled)")
+                    else:
+                        err = (result.payload or {}).get("code_string", "?") if result else "no response"
+                        print(f"[meshcore_adapter] tuning: set_tuning failed: {err}")
+                else:
+                    print("[meshcore_adapter] tuning: rx_delay already 0, no change needed")
+        except Exception as e:
+            print(f"[meshcore_adapter] tuning params error: {e}")
 
     # =====================================================
     # NODE NAME
@@ -219,30 +393,8 @@ class MeshCoreAdapter:
         try:
             await self._mc.commands.set_name(self._node_name)
             print(f"[meshcore_adapter] node name set: {self._node_name}")
-        except AttributeError:
-            print("[meshcore_adapter] set_name not supported by this meshcore version")
         except Exception as e:
-            print(f"[meshcore_adapter] could not set node name: {e}")
-
-    async def _on_self_info(self, event):
-        self._save_node_info(getattr(event, "payload", None))
-
-    def _save_node_info(self, info=None):
-        try:
-            if info is None:
-                info = self._mc.self_info if self._mc else {}
-            pubkey = info.get("public_key", "") if info else ""
-            if not pubkey:
-                print(f"[meshcore_adapter] public_key not available in self_info")
-                return
-            import json as _json
-            path = os.path.join(self.storage_path, "meshcore_node.json")
-            os.makedirs(self.storage_path, exist_ok=True)
-            with open(path, "w") as f:
-                _json.dump({"public_key": pubkey}, f)
-            print(f"[meshcore_adapter] node info saved: mc:{pubkey[:8]}")
-        except Exception as e:
-            print(f"[meshcore_adapter] could not save node info: {e}")
+            print(f"[meshcore_adapter] set_name error: {e}")
 
     # =====================================================
     # GPS LOCATION
@@ -250,29 +402,20 @@ class MeshCoreAdapter:
 
     async def _set_gps_location(self):
         mode = self._gps_mode
-        if mode == "disabled" or mode == "future":
-            return
-
-        # Enable location sharing in advertisements (adv_loc_policy=1)
-        try:
-            await self._mc.commands.set_advert_loc_policy(1)
-            print("[meshcore_adapter] GPS: location sharing enabled (adv_loc_policy=1)")
-        except Exception as e:
-            print(f"[meshcore_adapter] GPS: could not set advert_loc_policy: {e}")
-
         lat = lon = alt = None
 
         if mode == "manual":
             try:
                 lat = float(self._gps_lat)
                 lon = float(self._gps_lon)
-                alt = float(self._gps_alt or "0")
-            except ValueError:
-                print("[meshcore_adapter] GPS: invalid manual coordinates in config, skipping")
+                alt = float(self._gps_alt)
+            except (ValueError, TypeError):
                 return
 
         elif mode == "gpsd":
-            lat, lon, alt = await asyncio.get_event_loop().run_in_executor(None, self._read_gpsd)
+            lat, lon, alt = await asyncio.get_event_loop().run_in_executor(
+                None, self._read_gpsd
+            )
             if lat is None:
                 print("[meshcore_adapter] GPS: could not get fix from gpsd")
                 return
@@ -295,31 +438,33 @@ class MeshCoreAdapter:
         await self._push_gps(lat, lon, alt or 0, force=True)
 
     async def _push_gps(self, lat, lon, alt, force=False):
-        """Round to configured precision, send only when value changed or forced."""
-        prec = self._gps_precision
+        prec  = self._gps_precision
         lat_r = round(lat, prec)
         lon_r = round(lon, prec)
-        alt_r = round(alt, 1)
 
         changed = (lat_r, lon_r) != (self._last_gps_lat, self._last_gps_lon)
         if not changed and not force:
             return
 
         try:
-            await self._mc.commands.set_coords(lat_r, lon_r)
+            result = await self._mc.commands.set_coords(lat_r, lon_r)
+            from meshcore.events import EventType
+            if result and result.type == EventType.OK:
+                info = self._mc.self_info or {}
+                adv_loc = info.get("adv_loc_policy", "?")
+                print(f"[meshcore_adapter] GPS: location sharing enabled (adv_loc_policy={adv_loc})")
             self._last_gps_lat = lat_r
             self._last_gps_lon = lon_r
-            print(f"[meshcore_adapter] GPS pushed: lat={lat_r} lon={lon_r} alt={alt_r}")
-            await self._mc.commands.send_advert()
+            print(f"[meshcore_adapter] GPS coords set: lat={lat_r} lon={lon_r} alt={round(alt, 1)}")
+            # No send_advert here — caller is responsible for announcing.
+            # GPS coords are included automatically in the next advert.
         except Exception as e:
             print(f"[meshcore_adapter] GPS: set_coords failed: {e}")
 
     async def _gps_update_loop(self):
-        """Periodic GPS push — every 5 minutes, or sooner if position changed.
-        In 'future' mode, scans for a GPS device every 60 seconds until one appears."""
-        UPDATE_INTERVAL = 300   # seconds between forced updates
-        CHECK_INTERVAL  = 30    # how often to poll the GPS source
-        SCAN_INTERVAL   = 60    # how often to probe ports in 'future' mode
+        UPDATE_INTERVAL = 300
+        CHECK_INTERVAL  = 30
+        SCAN_INTERVAL   = 60
 
         last_forced = time.time()
         last_scan   = 0.0
@@ -332,7 +477,6 @@ class MeshCoreAdapter:
             loop = asyncio.get_event_loop()
             mode = self._gps_mode
 
-            # ── Auto-discovery for "future" mode ─────────────────
             if mode == "future":
                 now = time.time()
                 if now - last_scan >= SCAN_INTERVAL:
@@ -340,18 +484,16 @@ class MeshCoreAdapter:
                     device, _baud = await loop.run_in_executor(None, self._scan_for_gps)
                     if device:
                         print(f"[meshcore_adapter] GPS auto-discovered: {device}")
-                        self._gps_mode = "serial"
+                        self._gps_mode  = "serial"
                         self._gps_device = device
-                        # Fall through immediately to take an initial fix
                         lat, lon, alt = await loop.run_in_executor(
                             None, self._read_serial_gps, device, 30
                         )
                         if lat is not None:
                             await self._push_gps(lat, lon, alt, force=True)
                             last_forced = time.time()
-                continue   # check again on next tick; mode may have changed
+                continue
 
-            # ── Normal live GPS polling ───────────────────────────
             if mode == "gpsd":
                 lat, lon, alt = await loop.run_in_executor(None, self._read_gpsd, 15)
             elif mode == "serial":
@@ -364,7 +506,7 @@ class MeshCoreAdapter:
             if lat is None:
                 continue
 
-            now = time.time()
+            now   = time.time()
             force = (now - last_forced) >= UPDATE_INTERVAL
             await self._push_gps(lat, lon, alt, force=force)
             if force:
@@ -389,7 +531,6 @@ class MeshCoreAdapter:
     # =====================================================
 
     async def _query_channels(self):
-        """Load channel keys into the parser and enable RF-log decryption."""
         from meshcore.events import EventType as _ET
         found = 0
         for idx in range(8):
@@ -397,9 +538,9 @@ class MeshCoreAdapter:
                 result = await self._mc.commands.get_channel(idx)
                 if result.type == _ET.ERROR:
                     break
-                p = result.payload
+                p    = result.payload
                 name = p.get("channel_name", "")
-                h = p.get("channel_hash", "??")
+                h    = p.get("channel_hash", "??")
                 print(f"[meshcore_adapter] channel {idx}: name={name!r} hash={h}")
                 found += 1
             except Exception as e:
@@ -407,8 +548,6 @@ class MeshCoreAdapter:
                 break
         if found == 0:
             print("[meshcore_adapter] no channels configured on device")
-        # Enable RF-log decryption so LOG_DATA packets (0x88) yield plaintext
-        # even when the firmware doesn't emit a CHANNEL_MSG_RECV packet.
         self._mc.set_decrypt_channel_logs(True)
         print(f"[meshcore_adapter] channel decrypt enabled ({found} channel(s) loaded)")
 
@@ -417,7 +556,6 @@ class MeshCoreAdapter:
     # =====================================================
 
     async def _run_chan_server(self):
-
         try:
             os.unlink(CHAN_SOCK_PATH)
         except FileNotFoundError:
@@ -441,17 +579,14 @@ class MeshCoreAdapter:
                 pass
 
     async def _handle_chan_client(self, reader, writer):
-
         self._chan_clients.add(writer)
         try:
             import json
-            # Send buffered history
             for entry in list(self._chan_buffer):
                 writer.write((json.dumps(entry) + "\n").encode())
             writer.write((json.dumps({"type": "history_end"}) + "\n").encode())
             await writer.drain()
 
-            # Hold connection open until client disconnects
             while True:
                 data = await reader.read(1024)
                 if not data:
@@ -473,42 +608,41 @@ class MeshCoreAdapter:
     # =====================================================
 
     def _maybe_log_contact_announce(self, sender_id, contact, rssi=None, snr=None):
-        """Log to announce log when a contact is first seen or their position changes."""
         if not sender_id:
             return
-        nick = contact.get("adv_name") if contact else None
-        lat  = contact.get("lat")  if contact else None
-        lon  = contact.get("lon")  if contact else None
-        alt  = contact.get("alt")  if contact else None
+        nick    = contact.get("adv_name") if contact else None
+        lat     = contact.get("lat")  if contact else None
+        lon     = contact.get("lon")  if contact else None
+        alt     = contact.get("alt")  if contact else None
         pos_key = (round(lat, 3) if lat else None, round(lon, 3) if lon else None)
         if self._seen_contacts.get(sender_id) == pos_key:
             return
         self._seen_contacts[sender_id] = pos_key
-        logger.log_announce("meshcore", sender_id, nick=nick, lat=lat, lon=lon, alt=alt,
-                            rssi=rssi, snr=snr)
+        logger.log_announce("meshcore", sender_id, nick=nick,
+                            lat=lat, lon=lon, alt=alt, rssi=rssi, snr=snr)
 
     # =====================================================
-    # INBOUND MESSAGE
+    # INBOUND DM
     # =====================================================
 
     async def _on_contact_message(self, event):
-
         try:
-            payload = event.payload
+            payload       = event.payload
             pubkey_prefix = payload.get("pubkey_prefix", "")
-            text = payload.get("text", "").strip()
+            text          = payload.get("text", "").strip()
 
             if not text or not pubkey_prefix:
                 return
 
-            # Deduplicate: MeshCore retransmits when ACK is unreliable
-            now_ts = time.time()
+            self._last_rf_event = time.time()
+
+            now_ts    = time.time()
             dedup_key = (pubkey_prefix, text)
-            stale = [k for k, t in self._recent_msgs.items() if now_ts - t > 60]
+            stale     = [k for k, t in self._recent_msgs.items() if now_ts - t > 60]
             for k in stale:
                 del self._recent_msgs[k]
             if dedup_key in self._recent_msgs:
-                print(f"[meshcore_adapter] duplicate from {pubkey_prefix}, ignoring")
+                print(f"[meshcore_adapter] duplicate DM from {pubkey_prefix}, ignoring")
                 return
             self._recent_msgs[dedup_key] = now_ts
 
@@ -535,43 +669,41 @@ class MeshCoreAdapter:
             print(f"[meshcore_adapter] receive error: {e}")
 
     # =====================================================
-    # INBOUND CHANNEL MESSAGE (public broadcast)
+    # INBOUND CHANNEL MESSAGE (push path)
     # =====================================================
 
     _SENDER_RE = re.compile(r'^([0-9A-Fa-f]{4,16}):\s*(.*)', re.DOTALL)
 
     async def _on_channel_message(self, event):
-
         try:
-            payload = event.payload
-            chan_idx = payload.get("channel_idx", 0)
-            raw_text = payload.get("text", "").strip()
-            sender_ts = payload.get("sender_timestamp", 0)
+            payload    = event.payload
+            chan_idx   = payload.get("channel_idx", 0)
+            raw_text   = payload.get("text", "").strip()
+            sender_ts  = payload.get("sender_timestamp", 0)
 
             if not raw_text:
                 return
 
-            # MeshCore prepends sender pubkey prefix to channel messages: "AABBCCDD: message"
+            self._last_rf_event = time.time()
+
             sender_id = None
-            text = raw_text
+            text      = raw_text
             m = self._SENDER_RE.match(raw_text)
             if m:
                 sender_id = m.group(1).lower()
-                text = m.group(2).strip()
+                text      = m.group(2).strip()
 
-            # Dedup across CHANNEL_MSG_RECV and RX_LOG_DATA paths
             dedup_key = (sender_ts, text[:32])
-            now_ts = time.time()
-            stale = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
+            now_ts    = time.time()
+            stale     = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
             for k in stale:
                 del self._recent_chan_msgs[k]
             if dedup_key in self._recent_chan_msgs:
                 return
             self._recent_chan_msgs[dedup_key] = now_ts
 
-            # Try to resolve a friendly name from the contacts list
             sender_name = sender_id
-            contact = None
+            contact     = None
             if sender_id and self._mc:
                 contact = self._mc.get_contact_by_key_prefix(sender_id)
                 if contact:
@@ -587,28 +719,22 @@ class MeshCoreAdapter:
             print(f"[meshcore_adapter] channel message error: {e}")
 
     # =====================================================
-    # INBOUND CHANNEL MESSAGE via RF log (fallback path)
+    # INBOUND CHANNEL MESSAGE (RF-log path)
     # =====================================================
 
     async def _on_rf_log(self, event):
-        """Handle RX_LOG_DATA events.
-
-        The firmware emits LOG_DATA (0x88) for every received RF packet.
-        When decrypt_channels is True and the channel key is loaded, the
-        library decrypts GRP_TXT (channel) payloads so we get plaintext
-        even if the firmware never emits a CHANNEL_MSG_RECV packet.
-        """
         try:
             p = event.payload
+
+            self._last_rf_event = time.time()
+
             if p.get("payload_typename") != "GRP_TXT":
                 return
 
             chan_hash = p.get("chan_hash", "?")
-            msg = p.get("message")  # present only when decrypted successfully
+            msg       = p.get("message")
 
             if msg is None:
-                # Firmware received a channel message but our device can't
-                # decrypt it — the channel key doesn't match.
                 print(f"[meshcore_adapter] RF chan msg (undecrypted) — "
                       f"chan_hash={chan_hash}; check channel key on device")
                 return
@@ -617,31 +743,26 @@ class MeshCoreAdapter:
             if not raw_text:
                 return
 
-            # Strip the "AABBCCDD: message" sender prefix so the text
-            # matches what _on_channel_message produces for dedup.
             sender_id = None
-            text = raw_text
+            text      = raw_text
             m = self._SENDER_RE.match(raw_text)
             if m:
                 sender_id = m.group(1).lower()
-                text = m.group(2).strip()
+                text      = m.group(2).strip()
 
             sender_ts = p.get("sender_timestamp", 0)
-
-            # Dedup against messages already seen via CHANNEL_MSG_RECV
             dedup_key = (sender_ts, text[:32])
-            now_ts = time.time()
-            stale = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
+            now_ts    = time.time()
+            stale     = [k for k, t in self._recent_chan_msgs.items() if now_ts - t > 60]
             for k in stale:
                 del self._recent_chan_msgs[k]
             if dedup_key in self._recent_chan_msgs:
                 return
             self._recent_chan_msgs[dedup_key] = now_ts
 
-            # Resolve channel index and friendly sender name
-            chan_idx = 0
+            chan_idx    = 0
             sender_name = sender_id or chan_hash
-            contact = None
+            contact     = None
             if self._mc:
                 try:
                     for idx, ch in enumerate(self._mc._reader.packet_parser.channels):
@@ -656,33 +777,42 @@ class MeshCoreAdapter:
                         sender_name = contact.get("adv_name") or sender_id
 
             rssi = p.get("rssi")
-            snr = p.get("snr")
+            snr  = p.get("snr")
             self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr)
-            self._dispatch_channel_entry(chan_idx, sender_name, text, rssi, snr,
-                                         via="rflog")
+            self._dispatch_channel_entry(chan_idx, sender_name, text, rssi, snr, via="rflog")
 
         except Exception as e:
             print(f"[meshcore_adapter] RF log handler error: {e}")
 
     def _dispatch_channel_entry(self, chan_idx, sender, text, rssi, snr, via="push"):
-        """Build the channel entry dict, log it, buffer it, and push to socket clients."""
         import json
 
-        now = time.time()
+        now   = time.time()
         entry = {
-            "ts": now,
-            "when": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-            "proto": "meshcore",
-            "chan": chan_idx,
+            "ts":     now,
+            "when":   time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "proto":  "meshcore",
+            "chan":   chan_idx,
             "sender": sender,
-            "text": text,
+            "text":   text,
         }
         if rssi is not None:
             entry["rssi"] = rssi
         if snr is not None:
             entry["snr"] = snr
 
-        print(f"[meshcore_adapter] chan[{chan_idx}] <{sender}> {text!r} (via {via})")
+        chan_name = f"[{chan_idx}]"
+        if self._mc:
+            try:
+                chans = self._mc._reader.packet_parser.channels
+                ch    = chans[chan_idx] if chan_idx < len(chans) else {}
+                name  = ch.get("channel_name", "")
+                h     = ch.get("channel_hash", "")
+                chan_name = f"[{chan_idx}] <{name or h}>"
+            except Exception:
+                pass
+
+        print(f"[meshcore_adapter] chan{chan_name} '{sender}': {text!r} (via {via})")
         logger.log_channel("meshcore", sender, text, chan=chan_idx)
 
         self._chan_buffer.append(entry)
@@ -701,101 +831,239 @@ class MeshCoreAdapter:
     # =====================================================
 
     def _send_reply(self, pubkey_prefix, content, notify_cb=None):
+        """
+        Called synchronously from the engine thread.  Must NOT block.
 
-        if not self._loop or not self._mc:
-            print("[meshcore_adapter] not connected, dropping reply")
+        Puts the outbound job on the asyncio queue and returns immediately.
+        The _send_worker coroutine drains the queue one job at a time,
+        so concurrent sends are impossible.
+        """
+        if not self._loop or not self._send_queue:
+            print("[meshcore_adapter] not ready, dropping reply")
             if notify_cb:
                 notify_cb(False)
             return
 
-        future = asyncio.run_coroutine_threadsafe(
-            self._send_async(pubkey_prefix, content),
-            self._loop
-        )
-        try:
-            success = future.result(timeout=10)
-            if notify_cb:
-                notify_cb(bool(success))
-        except Exception as e:
-            print(f"[meshcore_adapter] send error: {e}")
-            if notify_cb:
-                notify_cb(False)
+        def _enqueue():
+            self._send_queue.put_nowait((pubkey_prefix, content, notify_cb, True))
+
+        self._loop.call_soon_threadsafe(_enqueue)
 
     # =====================================================
-    # OUTBOUND MESSAGE (async)
+    # SEND WORKER (single coroutine — serialises all sends)
     # =====================================================
 
-    async def _send_async(self, pubkey_prefix, content):
-
-        try:
-            from meshcore.events import EventType
-            if not self._mc:
-                return False
-
-            contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
-            if contact is None:
-                print(f"[meshcore_adapter] no contact for {pubkey_prefix}, dropping")
-                return False
-
-            # Diagnostic: log outbound queue depth before send
+    async def _send_worker(self):
+        """Drains the send queue one job at a time.  Never runs two sends concurrently."""
+        while True:
             try:
-                stats = await self._mc.commands.get_stats_core()
-                q = stats.payload.get("outbound_queue", "?") if stats and stats.payload else "?"
-                print(f"[meshcore_adapter] pre-send stats: outbound_queue={q}")
+                job = await self._send_queue.get()
+            except asyncio.CancelledError:
+                return
+
+            pubkey      = job[0]
+            content     = job[1]
+            notify_cb   = job[2]
+            # retry_on_reconnect: if True and we exhaust retries requesting a
+            # reconnect, re-queue the message for one final attempt after the
+            # firmware reboot clears all pool state.
+            retry_on_reconnect = job[3] if len(job) > 3 else False
+
+            # Wait for startup to complete before touching the serial connection.
+            # Reconnects clear _ready; it's re-set only after the full startup
+            # sequence finishes.  Without this, retries race with ensure_contacts()
+            # and other startup commands on the same serial port.
+            if self._ready:
+                await self._ready.wait()
+
+            try:
+                success = await self._send_one(pubkey, content)
+            except Exception as e:
+                print(f"[meshcore_adapter] send worker error: {e}")
+                success = False
+
+            if not success and retry_on_reconnect and self._reconnect_requested:
+                # _send_one exhausted retries and requested a firmware reboot.
+                # Re-queue WITHOUT the retry flag so the post-reboot attempt is
+                # the last — avoids infinite retry loops.
+                #
+                # Pre-clear _ready so the re-queued message blocks at _ready.wait()
+                # rather than racing ahead while _reconnect_requested is still set
+                # (reconnect may not have started for up to 1 second because
+                # _async_main polls on a 1-second sleep interval).
+                if self._ready:
+                    self._ready.clear()
+                print(f"[meshcore_adapter] re-queuing reply to {pubkey} for one retry after reconnect")
+                self._send_queue.put_nowait((pubkey, content, notify_cb, False))
+                self._send_queue.task_done()
+                continue   # don't invoke notify_cb yet
+
+            if notify_cb:
+                try:
+                    notify_cb(success)
+                except Exception:
+                    pass
+
+            self._send_queue.task_done()
+
+    # =====================================================
+    # OUTBOUND (single send with retry)
+    # =====================================================
+
+    async def _send_one(self, pubkey, content):
+        """
+        Send one DM using plain send_msg() (one firmware attempt per outer retry).
+
+        TABLE_FULL means createDatagram() returned NULL — 16-slot pool exhausted.
+        With rx_delay_base=0 and no-flood announce the rx_queue stays empty, yet
+        TABLE_FULL still occurs with queue_len=0; the true cause is unknown
+        (getFreeCount is not exposed via serial).  After 4 fast attempts the
+        caller (_send_worker) requests a firmware reboot and re-queues the message
+        for one retry against the clean post-reboot pool.  A mid-retry send_advert
+        (at attempt 3) also resets the SX126x AGC if that's the blocker.
+        """
+        from meshcore.events import EventType
+
+        if not self._mc:
+            print(f"[meshcore_adapter] not connected, dropping reply to {pubkey}")
+            return False
+
+        n = len(_SEND_DELAYS)
+        table_full_count = 0
+
+        # Snapshot pool state before the first attempt.  errors is a sticky
+        # bitmask (ERR_EVENT_FULL=0x01 set on any past pool exhaustion, cleared
+        # only at reboot).  If POOL_FULL is already set here, the pool was
+        # exhausted by something before our DM reply attempt — that narrows the
+        # root-cause hunt for TABLE_FULL-with-queue_len=0.
+        try:
+            cs0 = await self._mc.commands.get_stats_core()
+            if cs0 and cs0.payload:
+                ql0   = cs0.payload.get("queue_len", "?")
+                errs0 = cs0.payload.get("errors", 0)
+                bits0 = []
+                if errs0 & 0x01: bits0.append("POOL_FULL")
+                if errs0 & 0x02: bits0.append("CAD_TIMEOUT")
+                if errs0 & 0x04: bits0.append("STARTRX_TIMEOUT")
+                e0 = "|".join(bits0) if bits0 else "ok"
+                print(f"[meshcore_adapter] pre-send stats: queue_len={ql0} fw_err={e0}")
+        except Exception:
+            pass
+
+        for attempt, delay in enumerate(_SEND_DELAYS):
+            await asyncio.sleep(delay)
+
+            if not self._mc or self._reconnect_requested:
+                print(f"[meshcore_adapter] disconnected/reconnecting mid-retry, dropping reply to {pubkey}")
+                return False
+
+            # After 2 TABLE_FULL in a row, fire an advert to force TX→RX cycle.
+            # This breaks SX126x AGC lockup (Dispatcher.checkSend() CAD-busy
+            # counter resets on every non-TX tick — a TX is the only escape).
+            if table_full_count == 2:
+                print(f"[meshcore_adapter] TABLE_FULL x2 — sending AGC reset advert")
+                try:
+                    await self._mc.commands.send_advert(flood=False)
+                    await asyncio.sleep(0.5)   # allow TX→RX to complete
+                except Exception:
+                    pass
+
+            try:
+                result = await self._mc.commands.send_msg(pubkey, content)
+            except Exception as e:
+                print(f"[meshcore_adapter] send_msg exception: {e}")
+                return False
+
+            if result is None:
+                print(f"[meshcore_adapter] send_msg returned None for {pubkey}")
+                return False
+
+            if result.type == EventType.MSG_SENT:
+                print(f"[meshcore_adapter] sent to {pubkey} (attempt {attempt + 1}/{n})")
+                return True
+
+            err = (result.payload or {}).get("code_string", "?") if result.payload else "?"
+
+            if err != "ERR_CODE_TABLE_FULL":
+                print(f"[meshcore_adapter] send failed to {pubkey}: {err}")
+                return False
+
+            table_full_count += 1
+            next_delay = _SEND_DELAYS[attempt + 1] if attempt + 1 < n else "—"
+            # Log pool diagnostics: queue_len = send_queue only; errors flags
+            # include ERR_EVENT_FULL(0x01) CAD_TIMEOUT(0x02) STARTRX_TIMEOUT(0x04).
+            try:
+                cs = await self._mc.commands.get_stats_core()
+                if cs and cs.payload:
+                    ql   = cs.payload.get("queue_len", "?")
+                    errs = cs.payload.get("errors", 0)
+                    bits = []
+                    if errs & 0x01: bits.append("POOL_FULL")
+                    if errs & 0x02: bits.append("CAD_TIMEOUT")
+                    if errs & 0x04: bits.append("STARTRX_TIMEOUT")
+                    err_str = "|".join(bits) if bits else "ok"
+                else:
+                    ql = err_str = "?"
             except Exception:
-                pass
+                ql = err_str = "err"
+            print(f"[meshcore_adapter] TABLE_FULL attempt {attempt + 1}/{n} "
+                  f"queue_len={ql} fw_err={err_str}, retry in {next_delay}s")
 
-            _DELAYS = [0.4, 0.8, 1.5, 3.0, 5.0]
-            for attempt, delay in enumerate([0] + _DELAYS):
-                if delay:
-                    await asyncio.sleep(delay)
-                result = await self._mc.commands.send_msg_with_retry(contact, content)
-                if result is not None and result.type != EventType.ERROR:
-                    print(f"[meshcore_adapter] sent to {pubkey_prefix} (attempt {attempt + 1})")
-                    return True
-                err = (result.payload or {}).get("code_string") if result else "no ack"
-                if err != "ERR_CODE_TABLE_FULL":
-                    print(f"[meshcore_adapter] send failed to {pubkey_prefix}: {err}")
-                    return False
-                next_delay = _DELAYS[attempt] if attempt < len(_DELAYS) else "—"
-                print(f"[meshcore_adapter] TABLE_FULL attempt {attempt + 1}/{len(_DELAYS) + 1}, retry in {next_delay}s")
-            print(f"[meshcore_adapter] send failed to {pubkey_prefix}: TABLE_FULL after all retries")
-            return False
+        print(f"[meshcore_adapter] send failed to {pubkey}: TABLE_FULL after {n} attempts — requesting firmware reboot")
+        self._pool_tainted        = True   # firmware reboot needed to clear pool
+        self._reconnect_requested = True
+        return False
 
+    # =====================================================
+    # SELF INFO
+    # =====================================================
+
+    async def _on_self_info(self, event):
+        self._save_node_info(getattr(event, "payload", None))
+
+    def _save_node_info(self, info=None):
+        try:
+            if info is None:
+                info = self._mc.self_info if self._mc else {}
+            pubkey = info.get("public_key", "") if info else ""
+            if not pubkey:
+                print("[meshcore_adapter] public_key not available in self_info")
+                return
+            import json as _json
+            path = os.path.join(self.storage_path, "meshcore_node.json")
+            os.makedirs(self.storage_path, exist_ok=True)
+            with open(path, "w") as f:
+                _json.dump({"public_key": pubkey}, f)
+            print(f"[meshcore_adapter] node info saved: mc:{pubkey[:8]}")
         except Exception as e:
-            print(f"[meshcore_adapter] async send error: {e}")
-            return False
+            print(f"[meshcore_adapter] could not save node info: {e}")
 
     # =====================================================
     # ANNOUNCE
     # =====================================================
 
+    async def _announce_async(self):
+        try:
+            await self._mc.commands.send_advert(flood=False)
+            print("[meshcore_adapter] announced to direct neighbours (no-flood)")
+        except Exception as e:
+            print(f"[meshcore_adapter] announce failed: {e}")
+
     def announce(self):
         if not self._loop or not self._mc:
             print("[meshcore_adapter] not connected, cannot announce")
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self._announce_async(),
-            self._loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self._announce_async(), self._loop)
         try:
             future.result(timeout=10)
         except Exception as e:
             print(f"[meshcore_adapter] announce error: {e}")
-
-    async def _announce_async(self):
-        try:
-            await self._mc.commands.send_advert()
-            print("[meshcore_adapter] announced on network")
-        except Exception as e:
-            print(f"[meshcore_adapter] announce failed: {e}")
 
     # =====================================================
     # STOP
     # =====================================================
 
     def stop(self):
-
         self.running = False
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)

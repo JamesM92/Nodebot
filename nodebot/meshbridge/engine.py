@@ -180,7 +180,7 @@ class NodeBot:
     }
 
     # Per-transport practical message size limits
-    _MC_MSG_LIMIT   = 190   # MeshCore
+    _MC_MSG_LIMIT   = 160   # MeshCore MAX_TEXT_LEN — composeMsgPacket rejects > 160
     _MESH_MSG_LIMIT = 220   # Meshtastic (237 byte packet minus overhead)
 
     @staticmethod
