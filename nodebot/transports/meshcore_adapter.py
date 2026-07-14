@@ -13,7 +13,8 @@ CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
 CHAN_BUFFER_MAX = 500
 
 _AGC_TX_SECS         = 3 * 60   # send_advert() to reset SX126x AGC lockup (3 min baseline)
-_LOG_DATA_STALE_SECS = 2 * 60   # proactive AGC reset if no LOG_DATA events for 2 min
+_LOG_DATA_STALE_SECS = 90       # proactive AGC reset if no LOG_DATA events for 90 s
+_AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive failed TX resets
 _PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
 _WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
 _PERIODIC_ANN_SECS   = 12 * 3600
@@ -65,8 +66,9 @@ class MeshCoreAdapter:
         self._reconnect_requested = False  # set by _send_one to break inner loop
         self._pool_tainted        = False  # TABLE_FULL exhausted retries — firmware reboot needed
         self._ready               = None   # asyncio.Event; set when startup complete, cleared on reconnect
-        self._last_rf_event = time.time()
-        self._last_log_data = time.time()
+        self._last_rf_event  = time.time()
+        self._last_log_data  = time.time()
+        self._agc_reset_count = 0  # consecutive proactive resets with no RF recovery
 
         self._chan_buffer      = collections.deque(maxlen=CHAN_BUFFER_MAX)
         self._chan_clients     = set()
@@ -248,8 +250,9 @@ class MeshCoreAdapter:
                     _last_ann  = time.time()
                     _POLL_SECS = 5.0
                     _last_poll = asyncio.get_event_loop().time()
-                    self._last_rf_event = time.time()
-                    self._last_log_data = time.time()
+                    self._last_rf_event   = time.time()
+                    self._last_log_data   = time.time()
+                    self._agc_reset_count = 0
 
                     while self.running:
                         await asyncio.sleep(1)
@@ -272,18 +275,30 @@ class MeshCoreAdapter:
                             except Exception:
                                 pass
 
-                        # Proactive AGC reset — if no LOG_DATA events for 2 min the
+                        # Proactive AGC reset — if no LOG_DATA events for 90 s the
                         # SX126x analog frontend has likely latched onto interference.
-                        # Fire an extra advert immediately rather than waiting for the
-                        # 3-min baseline keepalive timer.
+                        # Companion Radio firmware uses startReceive() (not Calibrate)
+                        # on TX complete, so TX resets sometimes fail. After
+                        # _AGC_DEAD_COUNT consecutive failures, reboot the firmware
+                        # for a guaranteed full SX126x power-on calibration.
                         if (now - self._last_log_data >= _LOG_DATA_STALE_SECS
                                 and now - _last_agc >= 60):
                             _last_agc = now
-                            try:
-                                await self._mc.commands.send_advert(flood=False)
-                                print("[meshcore_adapter] AGC reset: no rflog events for 2+ min")
-                            except Exception:
-                                pass
+                            self._agc_reset_count += 1
+                            if self._agc_reset_count >= _AGC_DEAD_COUNT:
+                                print(f"[meshcore_adapter] AGC unrecoverable after "
+                                      f"{self._agc_reset_count} TX resets — rebooting firmware")
+                                self._agc_reset_count    = 0
+                                self._pool_tainted        = True
+                                self._reconnect_requested = True
+                            else:
+                                try:
+                                    await self._mc.commands.send_advert(flood=False)
+                                    print(f"[meshcore_adapter] AGC reset: no rflog events "
+                                          f"for 90+ s (attempt {self._agc_reset_count}/"
+                                          f"{_AGC_DEAD_COUNT - 1})")
+                                except Exception:
+                                    pass
 
                         # Health probe — lightweight, doesn't compete with DM delivery
                         if now - _last_ping >= _PING_SECS:
@@ -742,8 +757,9 @@ class MeshCoreAdapter:
         try:
             p = event.payload
 
-            self._last_rf_event = time.time()
-            self._last_log_data = time.time()
+            self._last_rf_event   = time.time()
+            self._last_log_data   = time.time()
+            self._agc_reset_count = 0  # RF is flowing again
 
             if p.get("payload_typename") != "GRP_TXT":
                 return
