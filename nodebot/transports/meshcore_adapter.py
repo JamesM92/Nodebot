@@ -92,6 +92,7 @@ class MeshCoreAdapter:
         self._radio_sf     = int(cfg.get("meshcore",   "radio_sf",     fallback="9"))
         self._radio_cr     = int(cfg.get("meshcore",   "radio_cr",     fallback="5"))
         self._radio_repeat = int(cfg.get("meshcore",   "radio_repeat", fallback="0"))
+        self._cfg_channels_raw = cfg.get("meshcore", "channels", fallback="").strip()
 
         self._gps_mode      = cfg.get("gps", "gps_mode",      fallback="disabled").strip()
         self._gps_lat       = cfg.get("gps", "gps_lat",       fallback="").strip()
@@ -563,8 +564,20 @@ class MeshCoreAdapter:
     # =====================================================
 
     async def _query_channels(self):
+        from hashlib import sha256 as _sha256
         from meshcore.events import EventType as _ET
-        found = 0
+
+        # Channels to configure from config.ini (comma-separated, e.g. "#test,#chat")
+        _cfg_channels = [
+            c.strip()
+            for c in self._cfg_channels_raw.split(",")
+            if c.strip()
+        ]
+
+        # ── Phase 1: read what the device currently has ──────────────────
+        _EMPTY_HASH = "37"   # sha256(b'\x00'*16)[:1].hex() — firmware default
+        slots       = {}     # idx → {"name": str, "hash": str}
+        found       = 0
         for idx in range(8):
             try:
                 result = await self._mc.commands.get_channel(idx)
@@ -573,11 +586,44 @@ class MeshCoreAdapter:
                 p    = result.payload
                 name = p.get("channel_name", "")
                 h    = p.get("channel_hash", "??")
+                slots[idx] = {"name": name, "hash": h}
                 print(f"[meshcore_adapter] channel {idx}: name={name!r} hash={h}")
                 found += 1
             except Exception as e:
                 print(f"[meshcore_adapter] channel {idx} query error: {e}")
                 break
+
+        # ── Phase 2: configure any channels missing from the device ───────
+        existing_names = {s["name"] for s in slots.values()}
+        missing        = [ch for ch in _cfg_channels if ch not in existing_names]
+
+        if missing:
+            # Find empty slots (hash == _EMPTY_HASH or slot not yet used)
+            empty_slots = [
+                idx for idx, s in slots.items()
+                if s["hash"] == _EMPTY_HASH and s["name"] == ""
+            ]
+            for ch_name in missing:
+                if not empty_slots:
+                    print(f"[meshcore_adapter] no empty slot for channel {ch_name!r} — device full")
+                    break
+                slot = empty_slots.pop(0)
+                try:
+                    result = await self._mc.commands.set_channel(slot, ch_name)
+                    from meshcore.events import EventType as _ET2
+                    if result and result.type == _ET2.OK:
+                        # Re-read the slot so reader.py calls newChannel() and
+                        # populates the parser's decryption cache for this key.
+                        await self._mc.commands.get_channel(slot)
+                        secret = _sha256(ch_name.encode()).digest()[:16]
+                        h      = _sha256(secret).digest()[:1].hex()
+                        print(f"[meshcore_adapter] channel {slot}: set {ch_name!r} hash={h}")
+                        found += 1
+                    else:
+                        print(f"[meshcore_adapter] channel {slot}: set_channel failed for {ch_name!r}")
+                except Exception as e:
+                    print(f"[meshcore_adapter] channel {slot}: set_channel error: {e}")
+
         if found == 0:
             print("[meshcore_adapter] no channels configured on device")
         self._mc.set_decrypt_channel_logs(True)
