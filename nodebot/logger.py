@@ -11,7 +11,9 @@ _lock = threading.Lock()
 _channel_path  = None
 _dm_path       = None
 _announce_path = None   # legacy text log (kept for backward compat)
-_announce_conn = None   # SQLite connection for announce DB
+_announce_conns = {}    # {proto: sqlite3.Connection} — one DB per protocol
+_announce_db_dir = None # directory where per-proto announce DBs are stored
+_telemetry_conn  = None # single DB for all telemetry frames
 
 _DISK_THRESHOLD = 0.90   # fraction — trigger trim above this
 _TRIM_FRACTION  = 0.25   # drop oldest 25% of lines when trimming
@@ -23,7 +25,7 @@ _writes_since_check = 0
 _last_check = 0.0
 
 _ANNOUNCE_COOLDOWN  = 15 * 60  # suppress repeated announces within this window (seconds)
-_ANNOUNCE_MAX_NODES = 50       # unique addresses to keep
+_ANNOUNCE_MAX_NODES = 500      # unique addresses to keep per protocol
 _ANNOUNCE_MAX_HIST  = 3        # announce rows to keep per address
 
 # When True, skip all LXMF announce logging. NodeBot runs as a shared-instance
@@ -33,7 +35,7 @@ _announce_local_only = True
 
 
 def _init_announce_db(path):
-    global _announce_conn
+    """Open (or create) an announce DB at path. Returns the connection."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -62,13 +64,78 @@ def _init_announce_db(path):
     except sqlite3.OperationalError:
         pass  # column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_addr_ts ON announces (addr, ts DESC)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS position_estimates (
+            addr     TEXT PRIMARY KEY,
+            proto    TEXT NOT NULL,
+            lat      REAL NOT NULL,
+            lon      REAL NOT NULL,
+            weight   REAL NOT NULL DEFAULT 1.0,
+            last_ts  REAL NOT NULL
+        )
+    """)
     conn.commit()
-    _announce_conn = conn
     print(f"[logger] announce db: {path}")
+    return conn
+
+
+def _get_announce_conn(proto):
+    """Return (and lazily open) the announce DB connection for a protocol."""
+    if proto in _announce_conns:
+        return _announce_conns[proto]
+    if not _announce_db_dir:
+        return None
+    path = os.path.join(_announce_db_dir, f"announces_{proto}.db")
+    conn = _init_announce_db(path)
+    _announce_conns[proto] = conn
+    return conn
+
+
+def backfill_positions(proto):
+    """Seed position_estimates from announces for addrs not yet estimated.
+
+    Runs once on startup after the DB is opened.  Each addr gets weight=1
+    seeded from its most recent GPS announce.  Skips addrs already in the
+    table so repeated calls are safe.
+    """
+    conn = _get_announce_conn(proto)
+    if conn is None:
+        return 0
+    try:
+        with _lock:
+            rows = conn.execute("""
+                SELECT proto, addr, lat, lon, MAX(ts) AS last_ts
+                FROM announces
+                WHERE lat IS NOT NULL AND lon IS NOT NULL
+                  AND addr NOT IN (SELECT addr FROM position_estimates)
+                GROUP BY addr
+            """).fetchall()
+            count = 0
+            for proto_r, addr, lat, lon, last_ts in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO position_estimates "
+                    "(addr, proto, lat, lon, weight, last_ts) VALUES (?,?,?,?,1.0,?)",
+                    (addr, proto_r, lat, lon, last_ts)
+                )
+                count += 1
+            conn.commit()
+            return count
+    except Exception as e:
+        print(f"[logger] backfill_positions error: {e}")
+        return 0
+
+
+def all_announce_db_paths():
+    """Return sorted list of all per-proto announce DB paths that exist on disk."""
+    import glob as _glob
+    if not _announce_db_dir:
+        return []
+    return sorted(_glob.glob(os.path.join(_announce_db_dir, "announces_*.db")))
 
 
 def init(config):
     global _channel_path, _dm_path, _announce_path, _max_bytes, _announce_local_only
+    global _announce_db_dir
 
     channel_raw     = config.get("logging", "channel_log",              fallback="").strip()
     dm_raw          = config.get("logging", "dm_log",                   fallback="").strip()
@@ -98,7 +165,11 @@ def init(config):
 
     if announce_db_raw:
         try:
-            _init_announce_db(os.path.expanduser(announce_db_raw))
+            expanded = os.path.expanduser(announce_db_raw)
+            _announce_db_dir = os.path.dirname(expanded)
+            os.makedirs(_announce_db_dir, exist_ok=True)
+            print(f"[logger] announce db dir: {_announce_db_dir} (per-protocol DBs)")
+            _init_telemetry_db(os.path.join(_announce_db_dir, "telemetry.db"))
         except Exception as e:
             print(f"[logger] announce db init error: {e}")
 
@@ -244,48 +315,171 @@ def log_dm(proto, sender, text, nick=None):
     _write(_dm_path, line)
 
 
+def backfill_nicks(proto, addr_nick_map):
+    """Set nick on existing DB rows that have nick=NULL. Never inserts new rows.
+
+    Returns the number of rows updated.
+    """
+    conn = _get_announce_conn(proto)
+    if conn is None or not addr_nick_map:
+        return 0
+    try:
+        count = 0
+        with _lock:
+            for addr, nick in addr_nick_map.items():
+                cur = conn.execute(
+                    "UPDATE announces SET nick=? WHERE proto=? AND addr=? AND nick IS NULL",
+                    (nick, proto, addr)
+                )
+                count += cur.rowcount
+            conn.commit()
+        return count
+    except Exception as e:
+        print(f"[logger] backfill_nicks error: {e}")
+        return 0
+
+
+def get_named_addrs(proto=None):
+    """Return the set of addrs that already have a nick in the announce DB."""
+    try:
+        conns = [_get_announce_conn(proto)] if proto else list(_announce_conns.values())
+        conns = [c for c in conns if c is not None]
+        if not conns:
+            return set()
+        result = set()
+        with _lock:
+            for conn in conns:
+                rows = conn.execute(
+                    "SELECT DISTINCT addr FROM announces WHERE nick IS NOT NULL"
+                ).fetchall()
+                result.update(r[0] for r in rows)
+        return result
+    except Exception:
+        return set()
+
+
+def _init_telemetry_db(path):
+    global _telemetry_conn
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS telemetry (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts                  REAL    NOT NULL,
+            proto               TEXT    NOT NULL,
+            addr                TEXT    NOT NULL,
+            battery_level       INTEGER,
+            voltage             REAL,
+            channel_utilization REAL,
+            air_util_tx         REAL,
+            temperature         REAL,
+            relative_humidity   REAL,
+            barometric_pressure REAL,
+            rssi                REAL,
+            snr                 REAL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_addr_ts ON telemetry (addr, ts DESC)")
+    conn.commit()
+    _telemetry_conn = conn
+    print(f"[logger] telemetry db: {path}")
+
+
+def log_telemetry(proto, addr, *, battery_level=None, voltage=None,
+                  channel_utilization=None, air_util_tx=None,
+                  temperature=None, relative_humidity=None,
+                  barometric_pressure=None, rssi=None, snr=None):
+    if _telemetry_conn is None:
+        return
+    try:
+        with _lock:
+            _telemetry_conn.execute("""
+                INSERT INTO telemetry
+                  (ts, proto, addr, battery_level, voltage,
+                   channel_utilization, air_util_tx,
+                   temperature, relative_humidity, barometric_pressure,
+                   rssi, snr)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (time.time(), proto, addr,
+                  battery_level, voltage,
+                  channel_utilization, air_util_tx,
+                  temperature, relative_humidity, barometric_pressure,
+                  rssi, snr))
+            _telemetry_conn.commit()
+    except Exception as e:
+        print(f"[logger] telemetry write error: {e}")
+
+
 def log_announce(proto, addr, *, nick=None, short_name=None, lat=None, lon=None, alt=None,
                  rssi=None, snr=None, hops=None, battery=None, modem_preset=None):
     now = time.time()
     sig = (nick, short_name, lat, lon, rssi, snr, hops, battery)
 
-    if _announce_conn is not None:
+    conn = _get_announce_conn(proto)
+    if conn is not None:
         try:
             with _lock:
-                row = _announce_conn.execute(
+                row = conn.execute(
                     "SELECT ts, nick, short_name, lat, lon, rssi, snr, hops, battery "
                     "FROM announces WHERE addr=? ORDER BY ts DESC LIMIT 1",
                     (addr,)
                 ).fetchone()
+                ts_insert = now
                 if row:
                     last_t    = row[0]
                     last_nick = row[1]
                     last_sig  = tuple(row[1:])
-                    # Always allow through if we're adding a name that wasn't there before
+                    # Always allow through if we're adding a name that wasn't there before.
+                    # Preserve the original timestamp so the "last seen" time reflects when
+                    # the node was actually heard, not when the name became known (e.g. on reboot).
                     adding_nick = nick and not last_nick
-                    if not adding_nick:
-                        if (now - last_t) < _ANNOUNCE_COOLDOWN or sig == last_sig:
+                    if adding_nick:
+                        ts_insert = last_t
+                    else:
+                        if (now - last_t) < _ANNOUNCE_COOLDOWN and sig == last_sig:
                             return
-                _announce_conn.execute(
+                conn.execute(
                     "INSERT INTO announces "
                     "(ts, proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (now, proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset)
+                    (ts_insert, proto, addr, nick, short_name, lat, lon, alt, rssi, snr, hops, battery, modem_preset)
                 )
                 # Keep last _ANNOUNCE_MAX_HIST rows per address
-                _announce_conn.execute("""
+                conn.execute("""
                     DELETE FROM announces WHERE addr=? AND id NOT IN (
                         SELECT id FROM announces WHERE addr=? ORDER BY ts DESC LIMIT ?
                     )
                 """, (addr, addr, _ANNOUNCE_MAX_HIST))
-                # Keep only _ANNOUNCE_MAX_NODES unique addresses (by most recent)
-                _announce_conn.execute("""
+                # Keep only _ANNOUNCE_MAX_NODES unique addresses per protocol (by most recent)
+                conn.execute("""
                     DELETE FROM announces WHERE addr NOT IN (
                         SELECT addr FROM announces GROUP BY addr
                         ORDER BY MAX(ts) DESC LIMIT ?
                     )
                 """, (_ANNOUNCE_MAX_NODES,))
-                _announce_conn.commit()
+                # Update weighted-average position estimate when GPS is present
+                if lat is not None and lon is not None:
+                    est = conn.execute(
+                        "SELECT lat, lon, weight FROM position_estimates WHERE addr=?",
+                        (addr,)
+                    ).fetchone()
+                    if est:
+                        old_lat, old_lon, w = est
+                        nw = w + 1.0
+                        conn.execute(
+                            "UPDATE position_estimates "
+                            "SET lat=?, lon=?, weight=?, last_ts=?, proto=? WHERE addr=?",
+                            ((old_lat * w + lat) / nw, (old_lon * w + lon) / nw,
+                             nw, now, proto, addr)
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO position_estimates "
+                            "(addr, proto, lat, lon, weight, last_ts) VALUES (?,?,?,?,1.0,?)",
+                            (addr, proto, lat, lon, now)
+                        )
+                conn.commit()
         except Exception as e:
             print(f"[logger] announce db write error: {e}")
         return

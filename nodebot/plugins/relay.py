@@ -6,6 +6,7 @@ import json
 import os
 import time
 from ..commands import register, BOT_INSTANCE
+from .. import contacts as _contacts
 
 # =====================================================
 # PERSISTENCE
@@ -53,7 +54,7 @@ def _save_state():
 # =====================================================
 
 LAST_CONTACT = {}
-SEEN_USERS = set()
+SEEN_USERS = _contacts.seen_set()
 ACTIVE_REPLY_SESSION = set()
 BLOCKED_USERS = set()          # permanent blocks
 TIMED_BLOCKS = {}              # addr -> expiry timestamp
@@ -77,6 +78,81 @@ def parse_target(target):
         return None, None
     proto, addr = target.split(":", 1)
     return proto.lower(), addr.lower()
+
+
+# Per-protocol address lengths.
+#   short_len — prefix used after first contact (minimum accepted length)
+#   full_len  — full pubkey length accepted for first/cold contact
+_PROTO_ADDR = {
+    #          short  full
+    "lxmf": (  16,    32),
+    "mc":   (  12,    64),
+    "mesh": (   8,    64),
+}
+
+
+def _resolve_addr(proto, addr):
+    """Resolve an address for relay — prefix lookup or first-contact full pubkey.
+
+    Returns (send_addr, note, error_str).
+    send_addr and error_str are mutually exclusive (exactly one is non-None).
+    note is set whenever a full pubkey is given (known or not) to remind the
+    sender of the prefix for future messages.
+    """
+    info = _PROTO_ADDR.get(proto)
+    if info is None:
+        return addr, None, None   # unknown protocol — pass through
+
+    short_len, full_len = info
+    addr = addr.lower()
+    n = len(addr)
+
+    if n < short_len:
+        if full_len > short_len:
+            return None, None, (
+                f"{proto} addresses must be {short_len} chars (prefix) "
+                f"or {full_len} chars (full pubkey for first contact)."
+            )
+        return None, None, f"{proto} addresses must be exactly {short_len} chars."
+
+    if n == short_len:
+        if f"{proto}:{addr}" not in SEEN_USERS:
+            if full_len > short_len:
+                return None, None, (
+                    f"'{addr}' hasn't been seen by NodeBot. "
+                    f"Provide the full {full_len}-char pubkey for first contact."
+                )
+            return None, None, (
+                f"'{addr}' hasn't been seen by NodeBot. "
+                f"They must message NodeBot before you can relay to them."
+            )
+        return addr, None, None
+
+    # Between prefix and full — only LXMF allows an intermediate prefix search
+    if n < full_len:
+        if proto != "lxmf":
+            return None, None, (
+                f"Use the {short_len}-char prefix or full {full_len}-char pubkey for {proto}."
+            )
+        matches = [s[len(proto) + 1:] for s in SEEN_USERS
+                   if s.startswith(f"{proto}:{addr}")]
+        if not matches:
+            return None, None, (
+                f"No {proto} contact matching '{addr}' has been seen by NodeBot. "
+                f"Provide the full {full_len}-char address for first contact."
+            )
+        if len(matches) > 1:
+            return None, None, (
+                f"Prefix '{addr}' matches {len(matches)} {proto} contacts — use more characters."
+            )
+        return matches[0], None, None
+
+    if n == full_len:
+        prefix = addr[:short_len]
+        note = f"Use relay {proto}:{prefix} for future messages."
+        return prefix, note, None
+
+    return None, None, f"Address too long for {proto} (max {full_len} chars)."
 
 
 def format_message(sender, message):
@@ -156,12 +232,35 @@ def _make_delivery_cb(notify_sender):
     return _cb
 
 
-# Canonical info for each transport: (short_prefix, display_name, example_address)
+# Canonical info for each transport: (proto_prefix, display_name)
 _PROTO_INFO = {
-    "lxmf_adapter":       ("lxmf",    "LXMF/Reticulum", "abc123def456"),
-    "meshcore_adapter":   ("mc",      "MeshCore",       "091733a4"),
-    "meshtastic_adapter": ("mesh",    "Meshtastic",     "02ee7eb8"),
+    "lxmf_adapter":        ("lxmf",  "LXMF/Reticulum"),
+    "meshcore_adapter":    ("mc",    "MeshCore"),
+    "meshtastic_adapter":  ("mesh",  "Meshtastic"),
+    "meshtastic_adapter2": ("mesh",  "Meshtastic"),
 }
+
+
+def _own_addr(adapter_name, adapter):
+    """Return NodeBot's own address prefix for an adapter, or None if unavailable."""
+    try:
+        if adapter_name == "lxmf_adapter":
+            dd = getattr(adapter, "delivery_destination", None)
+            if dd and dd.hash:
+                return dd.hash.hex()[:16]
+        elif adapter_name == "meshcore_adapter":
+            mc = getattr(adapter, "_mc", None)
+            info = (mc.self_info if mc else None) or {}
+            pk = info.get("public_key", "")
+            if pk:
+                return pk[:12]
+        elif adapter_name in ("meshtastic_adapter", "meshtastic_adapter2"):
+            num = getattr(adapter, "_my_node_num", None)
+            if num is not None:
+                return f"{num:08x}"
+    except Exception:
+        pass
+    return None
 
 
 def _relay_help():
@@ -173,19 +272,12 @@ def _relay_help():
         "Usage: relay <protocol:address> <message>",
         "Chain: relay <nodebot> relay <target> <message>",
         "",
+        "Address formats:",
+        "  Full pubkey needed for first contact.",
+        "  mc:<12-char prefix>   or 64-char pubkey",
+        "  mesh:<8-char prefix>  or 64-char pubkey",
+        "  lxmf:<16-char prefix> or 32-char pubkey",
     ]
-
-    active = [
-        f"  {prefix}:{example}  ({name})"
-        for adapter, (prefix, name, example) in _PROTO_INFO.items()
-        if adapter in transports
-    ]
-
-    if active:
-        lines.append("Active protocols:")
-        lines.extend(active)
-    else:
-        lines.append("No transports currently loaded.")
 
     return "\n".join(lines)
 
@@ -318,6 +410,18 @@ def relay_cmd(args, sender):
     if not proto or not addr:
         return "Invalid format. Use protocol:address"
 
+    raw_addr = addr
+    addr, first_contact_note, err = _resolve_addr(proto, addr)
+    if err:
+        return err
+
+    # If a full pubkey was given (first contact), persist it to the contacts DB now
+    # so the prefix resolves across restarts even before the contact replies.
+    if first_contact_note:
+        proto_info = _PROTO_ADDR.get(proto)
+        if proto_info and len(raw_addr) == proto_info[1]:
+            _contacts.upsert(proto, addr, pubkey=raw_addr)
+
     destination = f"{proto}:{addr}"
 
     # Normalise sender to 'proto:addr' string for consistent storage
@@ -336,6 +440,7 @@ def relay_cmd(args, sender):
 
     activate_session(destination)
     SEEN_USERS.add(destination)
+    _contacts.upsert(*destination.split(":", 1))
 
     # Chained relay: payload is itself a relay command. Send it raw so the
     # next NodeBot processes it as a command rather than a human message.
@@ -349,7 +454,7 @@ def relay_cmd(args, sender):
 
     send_message(destination, payload, notify_cb=_make_delivery_cb(norm_sender))
 
-    return None
+    return first_contact_note
 
 
 # =====================================================

@@ -9,6 +9,10 @@ from .meshbridge.engine import NodeBot as MeshEngine
 from .meshbridge.state import StateStore
 from . import commands as _commands
 from . import logger as _logger
+from . import contacts as _contacts
+from . import messages as _messages
+from . import paths as _paths
+from . import map_gen as _map_gen
 
 
 class NodeBot:
@@ -40,6 +44,10 @@ class NodeBot:
         _commands.set_state(self._state)
 
         _logger.init(self._config)
+        _contacts.init(self.storage_path, self._config)
+        _messages.init(self.storage_path, self._config)
+        _paths.init(self.storage_path)
+        _map_gen.init(self.storage_path, self._config)
         self._load_transports()
         self.engine.transports = self.transports
         self._start()

@@ -10,3 +10,4 @@ from nodebot.transports.meshtastic_adapter import MeshtasticAdapter as _Meshtast
 
 class MeshtasticAdapter2(_MeshtasticAdapter):
     CONFIG_SECTION = "meshtastic1"
+    ADAPTER_NAME   = "meshtastic_adapter2"

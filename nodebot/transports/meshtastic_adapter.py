@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 
-from .. import logger, radio_status
+from .. import logger, radio_status, contacts, messages, paths, path_discovery
 
 _PRESET_ABBR = {
     "LONG_FAST":      "LF",
@@ -37,6 +37,7 @@ class MeshtasticAdapter:
     """
 
     CONFIG_SECTION = "meshtastic"
+    ADAPTER_NAME   = "meshtastic_adapter"
 
     def __init__(self, storage_path, engine):
 
@@ -163,11 +164,13 @@ class MeshtasticAdapter:
                 self._disconnected.clear()
 
                 if self.engine:
-                    self.engine.flush_outbound("meshtastic_adapter")
+                    self.engine.flush_outbound(self.ADAPTER_NAME)
 
                 # Configure node identity and GPS
                 self._configure_node()
                 radio_status.update(self.CONFIG_SECTION, "connected")
+
+                path_discovery.init(self.storage_path)
 
                 # Start background loops
                 if self._tel_mode != "disabled":
@@ -175,6 +178,8 @@ class MeshtasticAdapter:
 
                 if self._gps_mode in ("gpsd", "serial", "future"):
                     threading.Thread(target=self._gps_loop, daemon=True).start()
+
+                threading.Thread(target=self._path_discovery_loop, daemon=True).start()
 
                 # Block here until the interface disconnects
                 self._disconnected.wait()
@@ -420,6 +425,10 @@ class MeshtasticAdapter:
                 self._log_nodeinfo_announce(packet, decoded, from_id)
                 return
 
+            if portnum == "TELEMETRY_APP":
+                self._log_telemetry(packet, decoded, from_id)
+                return
+
             if portnum != "TEXT_MESSAGE_APP":
                 return
 
@@ -451,22 +460,42 @@ class MeshtasticAdapter:
                 hops = packet.get("hopLimit")
                 preset_abbr = _PRESET_ABBR.get(self._lora_preset.upper(), self._lora_preset)
                 proto_tag = f"meshtastic:{preset_abbr}"
+                rssi = packet.get("rxRssi")
+                snr  = packet.get("rxSnr")
                 logger.log_channel(proto_tag, addr, text,
                                    long_name=long_name, short_name=short_name, hops=hops)
+                display_name = long_name or contacts.get_name("mesh", addr) or "unknown"
+                msg_text = f"{display_name}: {text}"
+                messages.log(proto_tag, addr, msg_text,
+                             hops=hops, rssi=rssi, snr=snr)
+                contacts.upsert("mesh", addr, name=long_name, short_name=short_name, hops=hops,
+                                event_type="channel")
                 return
 
             sender = f"mesh:{from_id.lstrip('!').lower()}"
 
             nick = None
+            short_name = None
+            pubkey_b64 = None
             if self._iface:
-                node_info = (self._iface.nodes or {}).get(from_id, {})
-                nick = node_info.get("user", {}).get("longName") or None
+                node_info  = (self._iface.nodes or {}).get(from_id, {})
+                user       = node_info.get("user", {})
+                nick       = user.get("longName") or None
+                short_name = user.get("shortName") or None
+                pubkey_b64 = user.get("publicKey") or None
+            addr = from_id.lstrip("!").lower()
+            contacts.upsert("mesh", addr, pubkey=pubkey_b64, name=nick,
+                            short_name=short_name, hops=packet.get("hopLimit"),
+                            event_type="dm")
 
             preset_abbr = _PRESET_ABBR.get(self._lora_preset.upper(), self._lora_preset)
             print(f"[meshtastic_adapter] msg from {sender}: {text!r}")
             logger.log_dm(f"meshtastic:{preset_abbr}", sender, text, nick=nick)
+            messages.log_dm(f"meshtastic:{preset_abbr}", addr, text, nick=nick)
+            path_discovery.mark_responded(addr, proto='meshtastic')
 
             if self.engine:
+                self.engine.register_mesh_sender(sender, self.ADAPTER_NAME)
                 self.engine.handle_message(
                     sender=sender,
                     message=text,
@@ -494,12 +523,25 @@ class MeshtasticAdapter:
             snr     = packet.get("rxSnr")
             hops    = packet.get("hopLimit")
             addr    = from_id.lstrip("!").lower() if from_id else "unknown"
+            # Look up name from the interface's node cache (populated by nodeinfo packets)
+            nick       = None
+            short_name = None
+            if self._iface and from_id:
+                node_info  = (self._iface.nodes or {}).get(from_id, {})
+                user       = node_info.get("user", {})
+                long_name  = user.get("longName")  or user.get("long_name",  "")
+                short_name = user.get("shortName") or user.get("short_name", "") or None
+                nick       = long_name or short_name or None
             logger.log_announce(
                 "meshtastic", addr,
+                nick=nick, short_name=short_name,
                 lat=lat, lon=lon, alt=alt,
                 rssi=rssi, snr=snr, hops=hops, battery=battery,
                 modem_preset=self._lora_preset,
             )
+            contacts.upsert("mesh", addr, name=nick, short_name=short_name,
+                            lat=lat, lon=lon, alt=alt, rssi=rssi, snr=snr,
+                            hops=hops, battery=battery, event_type="position")
         except Exception as e:
             print(f"[meshtastic_adapter] position announce log error: {e}")
 
@@ -522,8 +564,32 @@ class MeshtasticAdapter:
                 rssi=rssi, snr=snr, hops=hops,
                 modem_preset=self._lora_preset,
             )
+            contacts.upsert("mesh", addr, name=nick, short_name=short_name or None,
+                            rssi=rssi, snr=snr, hops=hops, event_type="nodeinfo")
         except Exception as e:
             print(f"[meshtastic_adapter] nodeinfo announce log error: {e}")
+
+    def _log_telemetry(self, packet, decoded, from_id):
+        try:
+            tel  = decoded.get("telemetry", {})
+            dm   = tel.get("deviceMetrics") or tel.get("device_metrics") or {}
+            em   = tel.get("environmentMetrics") or tel.get("environment_metrics") or {}
+            addr = (from_id or "").lstrip("!").lower() or "unknown"
+            rssi = packet.get("rxRssi")
+            snr  = packet.get("rxSnr")
+            logger.log_telemetry(
+                "meshtastic", addr,
+                battery_level       = dm.get("batteryLevel") or dm.get("battery_level"),
+                voltage             = dm.get("voltage"),
+                channel_utilization = dm.get("channelUtilization") or dm.get("channel_utilization"),
+                air_util_tx         = dm.get("airUtilTx") or dm.get("air_util_tx"),
+                temperature         = em.get("temperature"),
+                relative_humidity   = em.get("relativeHumidity") or em.get("relative_humidity"),
+                barometric_pressure = em.get("barometricPressure") or em.get("barometric_pressure"),
+                rssi=rssi, snr=snr,
+            )
+        except Exception as e:
+            print(f"[meshtastic_adapter] telemetry log error: {e}")
 
     # =====================================================
     # OUTBOUND MESSAGE
@@ -639,6 +705,102 @@ class MeshtasticAdapter:
             self._push_gps(force=force)
             if force:
                 last_forced = now
+
+    # =====================================================
+    # PATH DISCOVERY
+    # =====================================================
+
+    def _path_discovery_loop(self):
+        """Hourly: send one traceroute to the oldest GPS node with no path history.
+
+        Uses sendData with TRACEROUTE_APP portnum — no text DM to the remote
+        node.  The response carries relay node numbers which are logged to
+        paths.db so the path map can place relay positions.
+        """
+        time.sleep(300)   # 5-min startup delay
+        while self.running and not self._disconnected.is_set():
+            try:
+                from meshtastic import mesh_pb2, portnums_pb2
+                import google.protobuf.json_format
+
+                path_discovery.expire_stale_contacts()
+
+                announce_files = [
+                    f for f in logger.all_announce_db_paths()
+                    if 'meshtastic' in os.path.basename(f)
+                ]
+                paths_db = os.path.join(self.storage_path, "paths.db")
+                addr     = path_discovery.get_next_candidate(announce_files, paths_db)
+
+                if addr and self._iface and not self._disconnected.is_set():
+                    dest = f"!{addr}"
+                    print(f"[meshtastic_adapter] path discovery: traceroute → {dest}")
+
+                    route_event = threading.Event()
+                    route_data  = {}
+
+                    def _on_trace(p, _rd=route_data, _ev=route_event):
+                        try:
+                            rd = mesh_pb2.RouteDiscovery()
+                            rd.ParseFromString(p["decoded"]["payload"])
+                            d = google.protobuf.json_format.MessageToDict(rd)
+                            _rd['route']      = [n for n in d.get("route", [])]
+                            _rd['route_back'] = [n for n in d.get("routeBack", [])]
+                        except Exception as exc:
+                            _rd['error'] = str(exc)
+                        finally:
+                            _ev.set()
+
+                    try:
+                        self._iface.sendData(
+                            mesh_pb2.RouteDiscovery(),
+                            destinationId=dest,
+                            portNum=portnums_pb2.PortNum.TRACEROUTE_APP,
+                            wantResponse=True,
+                            onResponse=_on_trace,
+                            hopLimit=self._lora_hops,
+                        )
+                    except Exception as exc:
+                        print(f"[meshtastic_adapter] traceroute send error: {exc}")
+                        route_event.set()
+
+                    route_event.wait(timeout=60)
+                    path_discovery.mark_contacted(addr, proto='meshtastic')
+
+                    our_id    = f"{self._my_node_num:08x}" if self._my_node_num else None
+                    route     = route_data.get('route', [])
+                    r_back    = route_data.get('route_back', [])
+                    responded = route_event.is_set() and 'error' not in route_data
+
+                    if route:
+                        segs = ",".join(f"{n:08x}" for n in route)
+                        paths.log(f"Path: {segs}", sender_id=addr, our_id=our_id)
+                    if r_back:
+                        segs = ",".join(f"{n:08x}" for n in r_back)
+                        paths.log(f"Path: {segs}", sender_id=addr, our_id=our_id)
+
+                    if responded:
+                        path_str = ",".join(f"{n:08x}" for n in (route or r_back))
+                        path_discovery.mark_responded(
+                            addr, proto='meshtastic',
+                            path_str=path_str or "(direct)"
+                        )
+                        hops_note = f"{len(route)} hop(s)" if route else "direct"
+                        print(f"[meshtastic_adapter] traceroute ← {addr}: {hops_note}")
+                    else:
+                        print(f"[meshtastic_adapter] traceroute timed out or errored: {addr}")
+
+                elif not addr:
+                    print("[meshtastic_adapter] path discovery: no candidates")
+
+            except Exception as exc:
+                print(f"[meshtastic_adapter] path_discovery_loop error: {exc}")
+
+            # Sleep 1 hour, checking for disconnect/shutdown every second
+            for _ in range(3600):
+                if not self.running or self._disconnected.is_set():
+                    return
+                time.sleep(1)
 
     # =====================================================
     # TELEMETRY

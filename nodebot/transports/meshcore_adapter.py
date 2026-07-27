@@ -1,3 +1,12 @@
+# NOTE: This adapter relies on a custom MeshCore Companion Radio firmware build.
+# Standard upstream firmware does NOT call Calibrate(0x7F) after TX on Companion Radio,
+# which causes the SX126x AGC to latch onto interference and go deaf.
+# Required firmware: github.com/JamesM92/MeshCore  branch: fix/agc-reset-blocked-by-sticky-irq
+# Key changes vs upstream:
+#   - getAGCResetInterval() = 30000  (enables 30s AGC reset timer, absent in stock companion)
+#   - resetAGC() _agc_block_count bypass (forces Calibrate(0x7F) after 3 blocked attempts)
+#   - doResetAGC() calls sx126xResetAGC() — warm sleep + Calibrate(0x7F) + re-calibrate image
+
 import asyncio
 import collections
 import configparser
@@ -7,17 +16,19 @@ import threading
 import time
 
 from .. import logger
+from .. import contacts
+from .. import messages
+from .. import paths
+from .. import path_discovery
 
 
 CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
 CHAN_BUFFER_MAX = 500
 
-_AGC_TX_SECS         = 3 * 60   # send_advert() to reset SX126x AGC lockup (3 min baseline)
-_LOG_DATA_STALE_SECS = 90        # proactive AGC reset if no LOG_DATA events for 90s
-                                 # firmware's 30s Calibrate(0x7F) is blocked by
-                                 # isReceivingPacket() during interference; TX from
-                                 # Python side is the reliable clear
-_AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive failed TX resets
+_LOG_DATA_STALE_SECS = 90        # fallback AGC reset if no LOG_DATA events for 90s
+                                 # firmware handles lockup in ≤90s via _agc_block_count;
+                                 # this is a belt-and-suspenders Python-side safety net
+_AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive failed resets
 _PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
 _WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
 _PERIODIC_ANN_SECS   = 12 * 3600
@@ -153,8 +164,11 @@ class MeshCoreAdapter:
         self._send_queue = asyncio.Queue()
         self._ready      = asyncio.Event()
 
-        server_task = asyncio.create_task(self._run_chan_server())
-        send_task   = asyncio.create_task(self._send_worker())
+        server_task    = asyncio.create_task(self._run_chan_server())
+        send_task      = asyncio.create_task(self._send_worker())
+        discovery_task = asyncio.create_task(self._path_discovery_task())
+
+        path_discovery.init(self.storage_path)
 
         _retry      = 0
         _first_boot = True
@@ -212,6 +226,7 @@ class MeshCoreAdapter:
 
                     await self._mc.ensure_contacts()
                     print(f"[meshcore_adapter] contacts loaded: {len(self._mc.contacts)}")
+                    self._log_contact_announces()
 
                     await self._apply_radio_params()
                     await self._apply_tuning_params()
@@ -221,6 +236,8 @@ class MeshCoreAdapter:
                     sub_dm   = self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_message)
                     sub_chan = self._mc.subscribe(EventType.CHANNEL_MSG_RECV,  self._on_channel_message)
                     sub_rf   = self._mc.subscribe(EventType.RX_LOG_DATA,       self._on_rf_log)
+                    sub_adv  = self._mc.subscribe(EventType.NEW_CONTACT,       self._on_new_contact)
+                    sub_adv2 = self._mc.subscribe(EventType.ADVERTISEMENT,     self._on_advertisement)
 
                     await self._mc.start_auto_message_fetching()
                     print("[meshcore_adapter] listening for messages")
@@ -249,9 +266,9 @@ class MeshCoreAdapter:
                     if self._gps_mode in ("gpsd", "serial", "future"):
                         gps_task = asyncio.create_task(self._gps_update_loop())
 
-                    _last_agc  = time.time()
-                    _last_ping = time.time()
-                    _last_ann  = time.time()
+                    _last_ping         = time.time()
+                    _last_ann          = time.time()
+                    _last_stale_reset  = time.time()
                     _POLL_SECS = 5.0
                     _last_poll = asyncio.get_event_loop().time()
                     self._last_rf_event   = time.time()
@@ -271,23 +288,13 @@ class MeshCoreAdapter:
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
 
-                        # AGC keepalive — zero-hop TX resets SX126x analog frontend
-                        if now - _last_agc >= _AGC_TX_SECS:
-                            _last_agc = now
-                            try:
-                                await self._mc.commands.send_advert(flood=False)
-                            except Exception:
-                                pass
-
-                        # Proactive AGC reset — if no LOG_DATA events for 90 s the
-                        # SX126x analog frontend has likely latched onto interference.
-                        # Companion Radio firmware uses startReceive() (not Calibrate)
-                        # on TX complete, so TX resets sometimes fail. After
-                        # _AGC_DEAD_COUNT consecutive failures, reboot the firmware
-                        # for a guaranteed full SX126x power-on calibration.
+                        # Fallback AGC reset — firmware handles lockup via _agc_block_count
+                        # (forces Calibrate(0x7F) after 3 blocked attempts / ~90s).
+                        # This Python-side check catches any remaining edge cases and
+                        # reboots the firmware if repeated resets still don't recover.
                         if (now - self._last_log_data >= _LOG_DATA_STALE_SECS
-                                and now - _last_agc >= 30):
-                            _last_agc = now
+                                and now - _last_stale_reset >= 30):
+                            _last_stale_reset = now
                             self._agc_reset_count += 1
                             if self._agc_reset_count >= _AGC_DEAD_COUNT:
                                 print(f"[meshcore_adapter] AGC unrecoverable after "
@@ -343,6 +350,8 @@ class MeshCoreAdapter:
                     self._mc.unsubscribe(sub_dm)
                     self._mc.unsubscribe(sub_chan)
                     self._mc.unsubscribe(sub_rf)
+                    self._mc.unsubscribe(sub_adv)
+                    self._mc.unsubscribe(sub_adv2)
                     await self._mc.disconnect()
                     self._mc = None
                     if not self.running:
@@ -360,7 +369,8 @@ class MeshCoreAdapter:
         finally:
             send_task.cancel()
             server_task.cancel()
-            for t in (send_task, server_task):
+            discovery_task.cancel()
+            for t in (send_task, server_task, discovery_task):
                 try:
                     await t
                 except asyncio.CancelledError:
@@ -687,19 +697,119 @@ class MeshCoreAdapter:
     # ANNOUNCE LOGGING
     # =====================================================
 
+    def _log_contact_announces(self):
+        """Import device contact list into the announce DB and position estimates.
+
+        Inserts GPS contacts not yet in the DB (or with changed GPS), backfills
+        nicks on existing rows, and seeds position_estimates for any announce
+        rows not yet in the estimates table.
+        """
+        if not self._mc:
+            return
+        addr_nick_map = {
+            pk[:12]: c["adv_name"]
+            for pk, c in self._mc.contacts.items()
+            if c.get("adv_name")
+        }
+        count = logger.backfill_nicks("meshcore", addr_nick_map)
+        print(f"[meshcore_adapter] backfilled nicks for {count} contacts in announce DB")
+
+        imported = 0
+        for pk, c in self._mc.contacts.items():
+            addr = pk[:12]
+            nick = c.get("adv_name", "").replace("\0", "").strip() or None
+            lat  = c.get("adv_lat") or None
+            lon  = c.get("adv_lon") or None
+            if lat == 0.0: lat = None
+            if lon == 0.0: lon = None
+            contacts.upsert("mc", addr, pubkey=pk, name=nick, lat=lat, lon=lon)
+            # no event_type — startup bulk load, not a live RF event
+            if lat is not None and lon is not None:
+                logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon)
+                imported += 1
+
+        print(f"[meshcore_adapter] imported GPS for {imported} device contacts")
+        seeded = logger.backfill_positions("meshcore")
+        if seeded:
+            print(f"[meshcore_adapter] seeded position estimates for {seeded} nodes")
+
+    async def _on_new_contact(self, event):
+        """Log an announce when an RF advertisement is received (flood or zero-hop).
+
+        PUSH_CODE_NEW_ADVERT packets dispatch NEW_CONTACT — the payload contains
+        adv_name/adv_lat/adv_lon directly so no contacts dict lookup is needed.
+        """
+        try:
+            c = event.payload
+            pk = c.get("public_key", "")
+            if not pk:
+                return
+            nick = c.get("adv_name", "").replace("\0", "").strip() or None
+            if not nick:
+                return
+            addr = pk[:12]
+            lat = c.get("adv_lat") or None
+            lon = c.get("adv_lon") or None
+            if lat == 0.0:
+                lat = None
+            if lon == 0.0:
+                lon = None
+            logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon)
+            contacts.upsert("mc", addr, pubkey=pk, name=nick, lat=lat, lon=lon,
+                            event_type="advert")
+        except Exception as e:
+            print(f"[meshcore_adapter] new_contact announce error: {e}")
+
+    async def _on_advertisement(self, event):
+        """Log an announce when an RF advertisement is received (via ADVERTISEMENT push)."""
+        try:
+            pk = event.payload.get("public_key", "")
+            if not pk or not self._mc:
+                return
+            contact = self._mc.contacts.get(pk) or self._mc._pending_contacts.get(pk)
+            if not contact:
+                return
+            nick = contact.get("adv_name", "").replace("\0", "").strip() or None
+            if not nick:
+                return
+            addr = pk[:12]
+            lat = contact.get("adv_lat") or None
+            lon = contact.get("adv_lon") or None
+            if lat == 0.0:
+                lat = None
+            if lon == 0.0:
+                lon = None
+            logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon)
+            contacts.upsert("mc", addr, pubkey=pk, name=nick, lat=lat, lon=lon,
+                            event_type="advert")
+        except Exception as e:
+            print(f"[meshcore_adapter] advertisement announce error: {e}")
+
     def _maybe_log_contact_announce(self, sender_id, contact, rssi=None, snr=None):
-        if not sender_id:
+        # Only log when we have a name — raw sender_id hex prefixes from channel
+        # message payloads are not meaningful identifiers in the announce feed.
+        if not sender_id or not contact:
             return
-        nick    = contact.get("adv_name") if contact else None
-        lat     = contact.get("lat")  if contact else None
-        lon     = contact.get("lon")  if contact else None
-        alt     = contact.get("alt")  if contact else None
+        nick = contact.get("adv_name") or None
+        if not nick:
+            return
+        # Normalise to pk[:12] so this always writes to the same DB addr as
+        # _log_contact_announces and _on_advertisement (prevents duplicate entries
+        # and addr-format churn that pushes startup entries out of the 50-slot cap).
+        pk   = contact.get("public_key") or ""
+        addr = pk[:12] if len(pk) >= 12 else sender_id
+        lat     = contact.get("lat")
+        lon     = contact.get("lon")
+        alt     = contact.get("alt")
         pos_key = (round(lat, 3) if lat else None, round(lon, 3) if lon else None)
-        if self._seen_contacts.get(sender_id) == pos_key:
+        if self._seen_contacts.get(addr) == pos_key:
             return
-        self._seen_contacts[sender_id] = pos_key
-        logger.log_announce("meshcore", sender_id, nick=nick,
+        self._seen_contacts[addr] = pos_key
+        logger.log_announce("meshcore", addr, nick=nick,
                             lat=lat, lon=lon, alt=alt, rssi=rssi, snr=snr)
+        contacts.upsert("mc", addr, pubkey=pk or None, name=nick,
+                        lat=lat, lon=lon, alt=alt, rssi=rssi, snr=snr,
+                        event_type="advert")
 
     # =====================================================
     # INBOUND DM
@@ -728,10 +838,21 @@ class MeshCoreAdapter:
 
             print(f"[meshcore_adapter] msg from {pubkey_prefix}: {text!r}")
             logger.log_dm("meshcore", pubkey_prefix, text)
-
+            _our_id = None
+            try:
+                _our_id = (self._mc.self_info or {}).get("pubkey_pre") if self._mc else None
+            except Exception:
+                pass
+            paths.log(text, sender_id=pubkey_prefix, our_id=_our_id)
+            path_discovery.mark_responded(pubkey_prefix)
             contact = self._mc.get_contact_by_key_prefix(pubkey_prefix) if self._mc else None
+            nick_dm = contact.get("adv_name") if contact else None
+            messages.log_dm("meshcore", pubkey_prefix, text, nick=nick_dm)
             self._maybe_log_contact_announce(pubkey_prefix, contact)
             nick = contact.get("adv_name") if contact else None
+            pk = contact.get("public_key", "") if contact else ""
+            contacts.upsert("mc", pubkey_prefix, pubkey=pk or None, name=nick,
+                            event_type="dm")
 
             if self.engine:
                 loop = asyncio.get_event_loop()
@@ -789,11 +910,14 @@ class MeshCoreAdapter:
                 if contact:
                     sender_name = contact.get("adv_name") or sender_id
 
-            rssi = payload.get("RSSI")
-            snr  = payload.get("SNR")
+            rssi     = payload.get("RSSI")
+            snr      = payload.get("SNR")
+            path_len = payload.get("path_len")
+            hops     = path_len if (path_len is not None and path_len != 255) else None
             self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr)
-            self._dispatch_channel_entry(chan_idx, sender_name or sender_id or "unknown",
-                                         text, rssi, snr)
+            self._dispatch_channel_entry(chan_idx, sender_name or sender_id or "",
+                                         text, rssi, snr, hops=hops,
+                                         sender_id=sender_id)
 
         except Exception as e:
             print(f"[meshcore_adapter] channel message error: {e}")
@@ -858,15 +982,19 @@ class MeshCoreAdapter:
                     if contact:
                         sender_name = contact.get("adv_name") or sender_id
 
-            rssi = p.get("rssi")
-            snr  = p.get("snr")
+            rssi     = p.get("rssi")
+            snr      = p.get("snr")
+            path_len = p.get("path_len")
+            hops     = path_len if (path_len is not None and path_len != 255) else None
             self._maybe_log_contact_announce(sender_id, contact, rssi=rssi, snr=snr)
-            self._dispatch_channel_entry(chan_idx, sender_name, text, rssi, snr, via="rflog")
+            self._dispatch_channel_entry(chan_idx, sender_name or sender_id or "", text, rssi, snr,
+                                         hops=hops, via="rflog", sender_id=sender_id)
 
         except Exception as e:
             print(f"[meshcore_adapter] RF log handler error: {e}")
 
-    def _dispatch_channel_entry(self, chan_idx, sender, text, rssi, snr, via="push"):
+    def _dispatch_channel_entry(self, chan_idx, sender, text, rssi, snr, hops=None, via="push",
+                                sender_id=None):
         import json
 
         now   = time.time()
@@ -883,19 +1011,27 @@ class MeshCoreAdapter:
         if snr is not None:
             entry["snr"] = snr
 
-        chan_name = f"[{chan_idx}]"
+        chan_label = str(chan_idx)
         if self._mc:
             try:
                 chans = self._mc._reader.packet_parser.channels
                 ch    = chans[chan_idx] if chan_idx < len(chans) else {}
                 name  = ch.get("channel_name", "")
                 h     = ch.get("channel_hash", "")
-                chan_name = f"[{chan_idx}] <{name or h}>"
+                chan_label = name or h or str(chan_idx)
             except Exception:
                 pass
 
-        print(f"[meshcore_adapter] chan{chan_name} '{sender}': {text!r} (via {via})")
-        logger.log_channel("meshcore", sender, text, chan=chan_idx)
+        print(f"[meshcore_adapter] [{chan_label}] '{sender}': {text!r} (via {via})")
+        tag = f"meshcore/{chan_label}"
+        logger.log_channel(tag, sender, text, hops=hops)
+        messages.log(tag, sender, text, hops=hops, rssi=rssi, snr=snr)
+        our_id = None
+        try:
+            our_id = (self._mc.self_info or {}).get("pubkey_pre") if self._mc else None
+        except Exception:
+            pass
+        paths.log(text, sender_id=sender_id, our_id=our_id)
 
         self._chan_buffer.append(entry)
 
@@ -988,21 +1124,40 @@ class MeshCoreAdapter:
 
             self._send_queue.task_done()
 
+            # Wait for the firmware TX queue to drain before queuing the next DM.
+            # MSG_SENT means the firmware accepted the message, not that the LoRa
+            # packet was transmitted.  At LongFast (SF11/BW500) a 160-byte payload
+            # takes ~1.5s on-air, so a fixed 1.5s sleep races the transmitter.
+            # Poll queue_len instead: stop as soon as the queue is empty, then add
+            # a short guard.  Falls back to a fixed 3s cap if stats aren't available.
+            if not self._send_queue.empty():
+                for _ in range(20):   # up to 20 × 200ms = 4s
+                    await asyncio.sleep(0.2)
+                    try:
+                        cs = await self._mc.commands.get_stats_core()
+                        if cs and cs.payload and cs.payload.get("queue_len", 1) == 0:
+                            break
+                    except Exception:
+                        break
+                await asyncio.sleep(0.3)  # brief guard after queue clears
+
     # =====================================================
     # OUTBOUND (single send with retry)
     # =====================================================
 
     async def _send_one(self, pubkey, content):
         """
-        Send one DM using plain send_msg() (one firmware attempt per outer retry).
+        Send one DM with ACK confirmation and path-failure fallback.
 
-        TABLE_FULL means createDatagram() returned NULL — 16-slot pool exhausted.
-        With rx_delay_base=0 and no-flood announce the rx_queue stays empty, yet
-        TABLE_FULL still occurs with queue_len=0; the true cause is unknown
-        (getFreeCount is not exposed via serial).  After 4 fast attempts the
-        caller (_send_worker) requests a firmware reboot and re-queues the message
-        for one retry against the clean post-reboot pool.  A mid-retry send_advert
-        (at attempt 3) also resets the SX126x AGC if that's the blocker.
+        After MSG_SENT we wait up to suggested_timeout×1.5 (min 5 s) for the
+        ACK.  If no ACK arrives the contact's out_path may be stale; we call
+        reset_path() once to switch the contact to flood mode, then retry.
+        Flood DMs are broadcast and propagated by relay nodes so they can reach
+        multi-hop contacts even without an established out_path.
+
+        TABLE_FULL (16-slot datagram pool exhausted) is handled separately: two
+        consecutive TABLE_FULLs trigger an AGC-reset advert; four TABLE_FULLs
+        exhaust all retries and request a firmware reboot.
         """
         from meshcore.events import EventType
 
@@ -1012,6 +1167,7 @@ class MeshCoreAdapter:
 
         n = len(_SEND_DELAYS)
         table_full_count = 0
+        path_reset_done  = False  # reset_path is a one-shot per send attempt
 
         # Snapshot pool state before the first attempt.  errors is a sticky
         # bitmask (ERR_EVENT_FULL=0x01 set on any past pool exhaustion, cleared
@@ -1061,8 +1217,45 @@ class MeshCoreAdapter:
                 return False
 
             if result.type == EventType.MSG_SENT:
-                print(f"[meshcore_adapter] sent to {pubkey} (attempt {attempt + 1}/{n})")
-                return True
+                expected_ack = (result.payload or {}).get("expected_ack")
+                if expected_ack is None:
+                    # Older firmware without ACK field — treat MSG_SENT as success.
+                    print(f"[meshcore_adapter] sent to {pubkey} (attempt {attempt + 1}/{n})")
+                    return True
+
+                suggested_ms = (result.payload or {}).get("suggested_timeout", 5000)
+                ack_timeout  = max(5.0, suggested_ms / 1000.0 * 1.5)
+
+                ack = await self._mc.commands.dispatcher.wait_for_event(
+                    EventType.ACK,
+                    attribute_filters={"code": expected_ack.hex()},
+                    timeout=ack_timeout,
+                )
+                if ack is not None:
+                    print(f"[meshcore_adapter] ACK from {pubkey} (attempt {attempt + 1}/{n})")
+                    return True
+
+                # No ACK — out_path may be stale or the contact is unreachable
+                # on the current path.  Reset to flood once, then retry.
+                print(f"[meshcore_adapter] no ACK from {pubkey} after {ack_timeout:.0f}s")
+                if not path_reset_done:
+                    path_reset_done = True
+                    try:
+                        contact = self._mc.get_contact_by_key_prefix(pubkey)
+                        if not contact:
+                            for pk in (self._mc.contacts or {}):
+                                if pk.lower().startswith(pubkey.lower()):
+                                    contact = self._mc.contacts[pk]
+                                    break
+                        if contact:
+                            print(f"[meshcore_adapter] resetting path to flood for {pubkey}")
+                            await self._mc.commands.reset_path(contact)
+                            await asyncio.sleep(0.2)
+                        else:
+                            print(f"[meshcore_adapter] reset_path: contact {pubkey} not found")
+                    except Exception as e:
+                        print(f"[meshcore_adapter] reset_path error: {e}")
+                continue
 
             err = (result.payload or {}).get("code_string", "?") if result.payload else "?"
 
@@ -1091,10 +1284,99 @@ class MeshCoreAdapter:
             print(f"[meshcore_adapter] TABLE_FULL attempt {attempt + 1}/{n} "
                   f"queue_len={ql} fw_err={err_str}, retry in {next_delay}s")
 
-        print(f"[meshcore_adapter] send failed to {pubkey}: TABLE_FULL after {n} attempts — requesting firmware reboot")
-        self._pool_tainted        = True   # firmware reboot needed to clear pool
-        self._reconnect_requested = True
+        if table_full_count >= n:
+            print(f"[meshcore_adapter] send failed to {pubkey}: TABLE_FULL after {n} attempts — requesting firmware reboot")
+            self._pool_tainted        = True   # firmware reboot needed to clear pool
+            self._reconnect_requested = True
+        else:
+            print(f"[meshcore_adapter] no ACK from {pubkey} after path reset — giving up")
         return False
+
+    # =====================================================
+    # PATH DISCOVERY
+    # =====================================================
+
+    async def _path_discovery_task(self):
+        """Hourly background task: send one path-discovery request to the oldest
+        GPS node in the announce DB that has no entry in paths.db as a sender.
+
+        Uses send_path_discovery_sync (CMD 0x34) — no DM to the remote node.
+        The firmware floods the request; the target node replies with its
+        outbound/inbound path data which we log to paths.db for the path map.
+        """
+        await asyncio.sleep(300)   # 5-min startup delay
+        while self.running:
+            try:
+                await self._ready.wait()
+
+                path_discovery.expire_stale_contacts()
+
+                announce_files = logger.all_announce_db_paths()
+                paths_db       = os.path.join(self.storage_path, "paths.db")
+                addr           = path_discovery.get_next_candidate(announce_files, paths_db)
+
+                if addr and self._mc:
+                    contact = self._mc.get_contact_by_key_prefix(addr)
+                    if not contact:
+                        for pk in (self._mc.contacts or {}):
+                            if pk.lower().startswith(addr.lower()):
+                                contact = self._mc.contacts[pk]
+                                break
+
+                    if contact:
+                        pk = contact.get("public_key", "")
+                        if len(pk) >= 64:
+                            print(f"[path_discovery] querying path to {addr}")
+                            try:
+                                event = await self._mc.commands.send_path_discovery_sync(
+                                    pk, min_timeout=10
+                                )
+                            except Exception as exc:
+                                print(f"[path_discovery] send error for {addr}: {exc}")
+                                event = None
+
+                            path_discovery.mark_contacted(addr)
+
+                            if event and event.payload:
+                                pl     = event.payload
+                                hlen   = pl.get("out_path_hash_len", 1)
+                                n_hops = pl.get("out_path_len", 0)
+                                raw    = pl.get("out_path", "")
+                                if raw and n_hops > 0:
+                                    seg = hlen * 2
+                                    segs     = [raw[i:i+seg] for i in range(0, n_hops * seg, seg)]
+                                    path_str = ",".join(segs)
+                                    our_id   = None
+                                    try:
+                                        our_id = (self._mc.self_info or {}).get("pubkey_pre")
+                                    except Exception:
+                                        pass
+                                    paths.log(f"Path: {path_str}", sender_id=addr, our_id=our_id)
+                                    path_discovery.mark_responded(addr, path_str=path_str)
+                                    print(f"[path_discovery] path logged for {addr}: {path_str}")
+                                else:
+                                    path_discovery.mark_responded(addr)
+                                    print(f"[path_discovery] {addr} responded, no path data")
+                            else:
+                                print(f"[path_discovery] {addr} did not respond "
+                                      f"(will retry if attempts remain)")
+                        else:
+                            print(f"[path_discovery] no full pubkey for {addr}, skipping")
+                    else:
+                        print(f"[path_discovery] contact not found for {addr}, skipping")
+                elif not addr:
+                    print("[path_discovery] no candidates — all GPS nodes have path data "
+                          "or are exhausted")
+
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                print(f"[path_discovery] task error: {exc}")
+
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                return
 
     # =====================================================
     # SELF INFO
@@ -1117,6 +1399,24 @@ class MeshCoreAdapter:
             with open(path, "w") as f:
                 _json.dump({"public_key": pubkey}, f)
             print(f"[meshcore_adapter] node info saved: mc:{pubkey[:8]}")
+
+            # Also write self_info.json for the path map so the bot's own
+            # position can be used as a GPS anchor without needing an announce.
+            lat = info.get("lat") if info else None
+            lon = info.get("lon") if info else None
+            pubkey_pre = info.get("pubkey_pre") if info else None
+            name = info.get("adv_name") or info.get("name") if info else None
+            self_path = os.path.join(self.storage_path, "self_info.json")
+            with open(self_path, "w") as f:
+                _json.dump({
+                    "proto":      "meshcore",
+                    "pubkey_pre": pubkey_pre or pubkey[:6],
+                    "lat":        lat,
+                    "lon":        lon,
+                    "name":       name,
+                }, f)
+            gps_str = f"{lat:.4f},{lon:.4f}" if lat and lon else "no GPS"
+            print(f"[meshcore_adapter] self_info saved ({gps_str})")
         except Exception as e:
             print(f"[meshcore_adapter] could not save node info: {e}")
 

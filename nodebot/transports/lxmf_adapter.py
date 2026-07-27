@@ -6,7 +6,7 @@ import time
 import RNS
 import LXMF
 
-from .. import logger, radio_status
+from .. import logger, radio_status, contacts, messages
 
 
 class LXMFAdapter:
@@ -213,6 +213,7 @@ class LXMFAdapter:
                             except Exception:
                                 pass
                         logger.log_announce("lxmf", addr_hex, nick=nick)
+                        contacts.upsert("lxmf", addr_hex, name=nick, event_type="advert")
                         RNS.log(f"[lxmf_adapter] logged announce for {addr_hex}", RNS.LOG_NOTICE)
                     except Exception as e:
                         RNS.log(
@@ -353,6 +354,8 @@ class LXMFAdapter:
                 RNS.LOG_NOTICE
             )
             logger.log_dm("lxmf", sender_hash.hex(), content, nick=nick)
+            messages.log_dm("lxmf", addr_hex, content, nick=nick)
+            contacts.upsert("lxmf", addr_hex, name=nick, event_type="dm")
 
             if self.engine:
                 self.engine.handle_message(

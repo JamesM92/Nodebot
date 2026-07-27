@@ -11,6 +11,19 @@
 #
 # Run AFTER install_nodebot.sh:
 #   bash installer/install_meshcore.sh
+#
+# IMPORTANT — CUSTOM FIRMWARE REQUIRED:
+#   The MeshCore adapter requires a custom Companion Radio firmware build.
+#   Stock upstream firmware does not include AGC reset support for Companion
+#   Radio, causing the SX126x to go deaf after RF interference.
+#
+#   Flash firmware from:
+#     github.com/JamesM92/MeshCore  branch: fix/agc-reset-blocked-by-sticky-irq
+#
+#   Build with PlatformIO:
+#     cd /path/to/MeshCore
+#     git checkout fix/agc-reset-blocked-by-sticky-irq
+#     pio run -e <your_device_env> -t upload
 # ============================================================
 
 set -euo pipefail

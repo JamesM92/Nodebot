@@ -36,9 +36,16 @@ class NodeBot:
         # per-transport outbound queue for messages sent while a transport is down
         self._outbound_queue = {}  # adapter_name -> deque of (destination, text, notify_cb)
 
+        # track which meshtastic adapter last received from each mesh:addr
+        self._mesh_addr_adapter = {}  # "mesh:addr" -> adapter_name
+
         commands.set_bot(self)
 
         print(f"MeshBridge engine initialized: {name}")
+
+    def register_mesh_sender(self, sender, adapter_name):
+        """Record which meshtastic adapter last received from sender (e.g. 'mesh:addr')."""
+        self._mesh_addr_adapter[sender] = adapter_name
 
     # =====================================================
     # TRANSPORT DETECTION
@@ -273,7 +280,10 @@ class NodeBot:
             return
 
         proto, addr = destination.split(":", 1)
-        adapter_name = self._PROTO_MAP.get(proto.lower())
+        if proto.lower() == "mesh":
+            adapter_name = self._mesh_addr_adapter.get(destination) or self._PROTO_MAP.get("mesh")
+        else:
+            adapter_name = self._PROTO_MAP.get(proto.lower())
 
         if not adapter_name:
             print(f"[engine] send: unknown protocol '{proto}'")
@@ -298,7 +308,7 @@ class NodeBot:
                 cb = notify_cb if i == len(chunks) - 1 else None
                 if adapter_name == "lxmf_adapter":
                     adapter.send_message(bytes.fromhex(addr), chunk, notify_cb=cb)
-                elif adapter_name in ("meshcore_adapter", "meshtastic_adapter"):
+                elif adapter_name in ("meshcore_adapter", "meshtastic_adapter", "meshtastic_adapter2"):
                     adapter._send_reply(addr, chunk, notify_cb=cb)
         except Exception as e:
             print(f"[engine] send error to {destination}: {e}")
