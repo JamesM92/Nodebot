@@ -7,6 +7,7 @@ import os
 import time
 from ..commands import register, BOT_INSTANCE
 from .. import contacts as _contacts
+from .. import logger as _logger
 
 # =====================================================
 # PERSISTENCE
@@ -219,9 +220,11 @@ def store_history(user, msg):
     MESSAGE_HISTORY[user] = MESSAGE_HISTORY[user][-10:]
 
 
-def send_message(destination, text, notify_cb=None):
+def send_message(destination, text, notify_cb=None, sender=None):
     if hasattr(BOT_INSTANCE, "send"):
         BOT_INSTANCE.send(destination, text, notify_cb=notify_cb)
+    if sender:
+        _logger.log_relay(sender, destination, text)
 
 
 def _make_delivery_cb(notify_sender):
@@ -314,7 +317,7 @@ def auto_forward(sender, message):
     activate_session(destination)
     SESSION_TIMESTAMPS[effective_sender] = time.time()
 
-    send_message(destination, message)
+    send_message(destination, message, sender=effective_sender)
     return True
 
 
@@ -452,7 +455,7 @@ def relay_cmd(args, sender):
     store_history(norm_sender, payload)
     store_history(destination, payload)
 
-    send_message(destination, payload, notify_cb=_make_delivery_cb(norm_sender))
+    send_message(destination, payload, notify_cb=_make_delivery_cb(norm_sender), sender=norm_sender)
 
     return first_contact_note
 
@@ -496,7 +499,7 @@ def respond_cmd(args, sender):
     store_history(effective_sender, payload)
     store_history(destination, payload)
 
-    send_message(destination, payload, notify_cb=_make_delivery_cb(effective_sender))
+    send_message(destination, payload, notify_cb=_make_delivery_cb(effective_sender), sender=effective_sender)
 
     return None
 
@@ -541,7 +544,7 @@ def respond_colon(args, sender):
     store_history(effective_sender, payload)
     store_history(destination, payload)
 
-    send_message(destination, payload, notify_cb=_make_delivery_cb(effective_sender))
+    send_message(destination, payload, notify_cb=_make_delivery_cb(effective_sender), sender=effective_sender)
 
     return None
 

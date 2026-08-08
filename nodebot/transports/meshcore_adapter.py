@@ -1100,6 +1100,9 @@ class MeshCoreAdapter:
                 print(f"[meshcore_adapter] send worker error: {e}")
                 success = False
 
+            if success:
+                logger.log_dm_out("meshcore", pubkey, content)
+
             if not success and retry_on_reconnect and self._reconnect_requested:
                 # _send_one exhausted retries and requested a firmware reboot.
                 # Re-queue WITHOUT the retry flag so the post-reboot attempt is

@@ -434,6 +434,7 @@ class LXMFAdapter:
                 msg.delivery_callback = _on_delivery
 
             self.router.handle_outbound(msg)
+            logger.log_dm_out("lxmf", destination_hash.hex()[:16], content)
 
             print(f"[lxmf_adapter] sent reply to {RNS.prettyhexrep(destination_hash)}")
             RNS.log(

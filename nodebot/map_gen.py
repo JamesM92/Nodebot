@@ -369,7 +369,7 @@ def generate_async(announce_db):
     )
 
 
-def generate(announce_db):
+def generate(announce_db, days=7):
     """Generate the node map PNG. Returns (node_count, stats_dict)."""
     import math
     import matplotlib
@@ -384,7 +384,7 @@ def generate(announce_db):
 
     # Activity and RSSI per node — used for county heatmap and dot sizing
     announce_files = _announce_db_files(announce_db)
-    node_activity  = _read_node_activity(announce_files)
+    node_activity  = _read_node_activity(announce_files, days=days)
 
     lats = [r[3] for r in nodes]
     lons = [r[4] for r in nodes]
@@ -673,8 +673,8 @@ def generate_county_map_async(announce_db):
     )
 
 
-def generate_county_map(announce_db):
-    """Generate a 3-panel county overview PNG: node count, 7-day activity, avg RSSI.
+def generate_county_map(announce_db, days=7):
+    """Generate a 3-panel county overview PNG: node count, N-day activity, avg RSSI.
 
     Each panel uses the same county boundaries and map extent.  Panels are
     designed for side-by-side comparison so anomalies (e.g. high activity but
@@ -688,7 +688,7 @@ def generate_county_map(announce_db):
     import matplotlib.patches as _mp
 
     ann_files    = _announce_db_files(announce_db)
-    node_activity = _read_node_activity(ann_files)
+    node_activity = _read_node_activity(ann_files, days=days)
     all_gps_nodes = _read_gps_nodes(announce_db)
 
     if not all_gps_nodes:
@@ -772,7 +772,7 @@ def generate_county_map(announce_db):
 
     PANELS = [
         {"title": "Node Count",        "color": "#3388bb", "metric": "count"},
-        {"title": "Activity  (7 d)",   "color": "#cc8822", "metric": "activity"},
+        {"title": f"Activity  ({days} d)", "color": "#cc8822", "metric": "activity"},
         {"title": "Avg RSSI Heard",    "color": None,      "metric": "rssi"},
     ]
 
@@ -1392,7 +1392,7 @@ def _rssi_relay_estimates(paths_with_rssi, prefix_gps, path_loss):
     return estimates
 
 
-def generate_path_map(announce_db):
+def generate_path_map(announce_db, days=7):
     """Generate the path connectivity map PNG."""
     import math
     import matplotlib
@@ -1574,7 +1574,7 @@ def generate_path_map(announce_db):
     centrality     = _relay_centrality(all_paths, path_node_coords)
 
     _ann_files  = _announce_db_files(announce_db)
-    node_activity = _read_node_activity(_ann_files)
+    node_activity = _read_node_activity(_ann_files, days=days)
     max_act_path  = max(
         (node_activity.get(r[1].lower(), (None, 0))[1] for r in all_gps_nodes),
         default=1,

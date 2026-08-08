@@ -315,6 +315,20 @@ def log_dm(proto, sender, text, nick=None):
     _write(_dm_path, line)
 
 
+def log_dm_out(proto, addr, text):
+    if not _dm_path:
+        return
+    safe = text.replace("\n", " ").replace("\r", "")
+    _write(_dm_path, f"{_ts()} [{proto}/dm>] <{addr}> {safe}")
+
+
+def log_relay(src, dst, text):
+    if not _dm_path:
+        return
+    safe = text.replace("\n", " ").replace("\r", "")
+    _write(_dm_path, f"{_ts()} [relay] <{src}> > {dst} | {safe}")
+
+
 def backfill_nicks(proto, addr_nick_map):
     """Set nick on existing DB rows that have nick=NULL. Never inserts new rows.
 
