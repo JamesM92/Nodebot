@@ -199,6 +199,46 @@ def _read_node_activity(announce_db_files, days=7):
     return result
 
 
+def _active_lookback_days(announce_db_files, target_days=7, max_lookback=90):
+    """Return the calendar-day span needed to capture *target_days* days that
+    have at least one announce record, skipping over outage gaps.
+
+    Example: 7 target days + 3-day outage → returns 10.
+    Falls back to *target_days* if the DB has no history yet.
+    """
+    from datetime import datetime as _dt
+
+    cutoff = time.time() - max_lookback * 86400
+    active_dates = set()
+    for f in announce_db_files:
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+            for (d,) in conn.execute(
+                "SELECT DISTINCT date(ts, 'unixepoch') FROM announces WHERE ts >= ?",
+                (cutoff,),
+            ).fetchall():
+                active_dates.add(d)
+        except Exception:
+            pass
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if not active_dates:
+        return target_days
+
+    sorted_dates = sorted(active_dates, reverse=True)  # newest first
+    # Pick the target_days-th most recent active date as our cutoff
+    oldest = sorted_dates[min(target_days - 1, len(sorted_dates) - 1)]
+    oldest_dt = _dt.strptime(oldest, "%Y-%m-%d")
+    days = (_dt.utcnow() - oldest_dt).days + 1
+    return max(days, target_days)
+
+
 def _path_stability_scores(paths_db_path):
     """Return dict frozenset({pa, pb}) → stability ∈ [0, 1].
 
