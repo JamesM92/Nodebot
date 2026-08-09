@@ -291,26 +291,32 @@ class MeshCoreAdapter:
 
                         # Fallback AGC reset — firmware handles lockup via _agc_block_count
                         # (forces Calibrate(0x7F) after 3 blocked attempts / ~90s).
-                        # This Python-side check catches any remaining edge cases and
-                        # reboots the firmware if repeated resets still don't recover.
+                        # This Python-side check catches remaining edge cases and reboots
+                        # the firmware only if TX itself is failing (real lockup), not
+                        # merely because the network is quiet (no nearby nodes to hear us).
                         if (now - self._last_log_data >= _LOG_DATA_STALE_SECS
                                 and now - _last_stale_reset >= 30):
                             _last_stale_reset = now
-                            self._agc_reset_count += 1
-                            if self._agc_reset_count >= _AGC_DEAD_COUNT:
-                                print(f"[meshcore_adapter] AGC unrecoverable after "
-                                      f"{self._agc_reset_count} TX resets — rebooting firmware")
-                                self._agc_reset_count    = 0
-                                self._pool_tainted        = True
-                                self._reconnect_requested = True
-                            else:
-                                try:
-                                    await self._mc.commands.send_advert(flood=False)
-                                    print(f"[meshcore_adapter] AGC reset: no rflog events "
-                                          f"for 90+ s (attempt {self._agc_reset_count}/"
-                                          f"{_AGC_DEAD_COUNT - 1})")
-                                except Exception:
-                                    pass
+                            try:
+                                await self._mc.commands.send_advert(flood=False)
+                                # TX succeeded — radio is functional, just a quiet network.
+                                # Reset the stale clock so we don't loop; clear fail count.
+                                self._last_log_data   = time.time()
+                                self._agc_reset_count = 0
+                                print("[meshcore_adapter] AGC keepalive TX (no rflog "
+                                      "for 90+ s, radio healthy — quiet network)")
+                            except Exception:
+                                # TX failed — radio may be genuinely stuck; count it.
+                                self._agc_reset_count += 1
+                                if self._agc_reset_count >= _AGC_DEAD_COUNT:
+                                    print(f"[meshcore_adapter] AGC unrecoverable after "
+                                          f"{self._agc_reset_count} TX failures — rebooting firmware")
+                                    self._agc_reset_count    = 0
+                                    self._pool_tainted        = True
+                                    self._reconnect_requested = True
+                                else:
+                                    print(f"[meshcore_adapter] AGC reset TX failed "
+                                          f"(attempt {self._agc_reset_count}/{_AGC_DEAD_COUNT - 1})")
 
                         # Health probe — lightweight, doesn't compete with DM delivery
                         if now - _last_ping >= _PING_SECS:
