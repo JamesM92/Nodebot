@@ -86,7 +86,9 @@ class MeshCoreAdapter:
         self._ready               = None   # asyncio.Event; set when startup complete, cleared on reconnect
         self._last_rf_event  = time.time()
         self._last_log_data  = time.time()
-        self._agc_reset_count = 0  # consecutive proactive resets with no RF recovery
+        self._agc_reset_count    = 0  # consecutive proactive resets with no RF recovery
+        self._lockup_reboot_count = 0  # consecutive reboots without any rflog improvement;
+                                       # used to back off from 10 min to 60 min on quiet networks
 
         self._chan_buffer      = collections.deque(maxlen=CHAN_BUFFER_MAX)
         self._chan_clients     = set()
@@ -304,15 +306,25 @@ class MeshCoreAdapter:
                         #   recovery on stock hardware.  _AGC_LOCKUP_SECS gives quiet
                         #   networks a fair window before assuming lockup.
                         silence = now - self._last_log_data
-                        if silence >= _AGC_LOCKUP_SECS:
+                        # After the first reboot fails to restore RX, assume quiet network
+                        # and back off to 60 min so we don't churn on repeater outages.
+                        # Count resets to 0 as soon as any rflog event arrives.
+                        _effective_lockup_secs = (
+                            _AGC_LOCKUP_SECS if self._lockup_reboot_count == 0
+                            else _AGC_LOCKUP_SECS * 6   # 60 min — safety-net reboot only
+                        )
+                        if silence >= _effective_lockup_secs:
                             # Extended silence — reboot to restore RX regardless of TX health.
                             mins = int(silence // 60)
-                            print(f"[meshcore_adapter] AGC lockup assumed: no rflog for "
-                                  f"{mins} min — rebooting firmware to restore RX")
-                            self._last_log_data       = time.time()
-                            self._agc_reset_count     = 0
-                            self._pool_tainted        = True
-                            self._reconnect_requested = True
+                            tier = "safety-net" if self._lockup_reboot_count > 0 else "lockup"
+                            print(f"[meshcore_adapter] AGC {tier}: no rflog for "
+                                  f"{mins} min — rebooting firmware to restore RX "
+                                  f"(reboot #{self._lockup_reboot_count + 1})")
+                            self._last_log_data        = time.time()
+                            self._agc_reset_count      = 0
+                            self._lockup_reboot_count += 1
+                            self._pool_tainted         = True
+                            self._reconnect_requested  = True
                         elif (silence >= _LOG_DATA_STALE_SECS
                                 and now - _last_stale_reset >= 30):
                             _last_stale_reset = now
@@ -953,9 +965,10 @@ class MeshCoreAdapter:
         try:
             p = event.payload
 
-            self._last_rf_event   = time.time()
-            self._last_log_data   = time.time()
-            self._agc_reset_count = 0  # RF is flowing again
+            self._last_rf_event       = time.time()
+            self._last_log_data       = time.time()
+            self._agc_reset_count     = 0  # RF is flowing again
+            self._lockup_reboot_count = 0  # network is active — reset backoff
 
             if p.get("payload_typename") != "GRP_TXT":
                 return
