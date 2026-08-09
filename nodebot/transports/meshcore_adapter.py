@@ -811,7 +811,10 @@ class MeshCoreAdapter:
             contacts.upsert("mc", addr, pubkey=pk, name=nick, lat=lat, lon=lon)
             # no event_type — startup bulk load, not a live RF event
             if lat is not None and lon is not None:
-                logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon)
+                # preserve_ts=True: don't overwrite "last seen" timestamps on reconnect.
+                # Nodes keep their original announce time; only genuinely new GPS gets inserted.
+                logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon,
+                                    preserve_ts=True)
                 imported += 1
 
         print(f"[meshcore_adapter] imported GPS for {imported} device contacts")

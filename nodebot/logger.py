@@ -426,7 +426,17 @@ def log_telemetry(proto, addr, *, battery_level=None, voltage=None,
 
 
 def log_announce(proto, addr, *, nick=None, short_name=None, lat=None, lon=None, alt=None,
-                 rssi=None, snr=None, hops=None, battery=None, modem_preset=None):
+                 rssi=None, snr=None, hops=None, battery=None, modem_preset=None,
+                 preserve_ts=False):
+    """Insert an announce row.
+
+    preserve_ts=True is for startup bulk-loads (contact list import).  When set:
+      - If the node is already in the DB with the same lat/lon → skip entirely,
+        so the "last seen" time is never overwritten just because nodebot restarted.
+      - If the GPS has changed → insert, but keep the original timestamp so the
+        node doesn't appear to have just been heard.
+      - If the node has never been announced → insert normally with ts=now.
+    """
     now = time.time()
     sig = (nick, short_name, lat, lon, rssi, snr, hops, battery)
 
@@ -450,6 +460,15 @@ def log_announce(proto, addr, *, nick=None, short_name=None, lat=None, lon=None,
                     adding_nick = nick and not last_nick
                     if adding_nick:
                         ts_insert = last_t
+                    elif preserve_ts:
+                        # Startup bulk-load: never update ts just because cooldown expired.
+                        # If lat/lon unchanged → skip entirely.
+                        # If lat/lon changed → insert but keep the original ts so the node
+                        # doesn't appear freshly heard when it was just a contact-list update.
+                        last_lat, last_lon = row[3], row[4]
+                        if lat == last_lat and lon == last_lon:
+                            return  # GPS unchanged — nothing new to record
+                        ts_insert = last_t   # GPS changed but ts stays original
                     else:
                         if (now - last_t) < _ANNOUNCE_COOLDOWN and sig == last_sig:
                             return
