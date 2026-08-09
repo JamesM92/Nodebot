@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Standalone worker — runs map generation in the background and removes the lockfile."""
-import sys
+import configparser as _cp
 import os
+import sys
 
 if len(sys.argv) < 4:
     sys.exit(1)
@@ -27,7 +28,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # How many active (non-outage) days to show on the maps.  The lookback window
 # is extended automatically to skip over any downtime gaps.
-import configparser as _cp
 _cfg = _cp.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(__file__), "..", "config.ini"))
 try:

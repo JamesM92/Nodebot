@@ -1202,7 +1202,7 @@ class MeshCoreAdapter:
             # This breaks SX126x AGC lockup (Dispatcher.checkSend() CAD-busy
             # counter resets on every non-TX tick — a TX is the only escape).
             if table_full_count == 2:
-                print(f"[meshcore_adapter] TABLE_FULL x2 — sending AGC reset advert")
+                print("[meshcore_adapter] TABLE_FULL x2 — sending AGC reset advert")
                 try:
                     await self._mc.commands.send_advert(flood=False)
                     await asyncio.sleep(0.5)   # allow TX→RX to complete

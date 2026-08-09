@@ -121,7 +121,8 @@ def _write_placeholder(path, label="NodeBot node map"):
         img.save(path, "PNG")
     except Exception:
         # Fallback: minimal valid 1×1 PNG
-        import struct, zlib
+        import struct
+        import zlib
         def _chunk(tag, data):
             c = zlib.crc32(tag + data) & 0xFFFFFFFF
             return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", c)
@@ -411,9 +412,7 @@ def generate_async(announce_db):
 
 def generate(announce_db, days=7):
     """Generate the node map PNG. Returns (node_count, stats_dict)."""
-    import math
     import matplotlib
-    import matplotlib.colors as mcolors
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patheffects as pe
@@ -1434,9 +1433,7 @@ def _rssi_relay_estimates(paths_with_rssi, prefix_gps, path_loss):
 
 def generate_path_map(announce_db, days=7):
     """Generate the path connectivity map PNG."""
-    import math
     import matplotlib
-    import matplotlib.colors as mcolors
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patheffects as pe
@@ -1819,7 +1816,6 @@ def generate_path_map(announce_db, days=7):
             txt.set_path_effects([pe.withStroke(linewidth=1.2, foreground="#1a1a2e")])
 
     # ── Legend ───────────────────────────────────────────────────────────────
-    import matplotlib.patches as _mp
     _lh = [
         # — GPS nodes —
         plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#00ccff",

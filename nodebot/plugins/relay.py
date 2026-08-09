@@ -268,8 +268,6 @@ def _own_addr(adapter_name, adapter):
 
 def _relay_help():
     """Return usage text listing only the transports currently loaded."""
-    transports = getattr(BOT_INSTANCE, "transports", {}) if BOT_INSTANCE else {}
-
     lines = [
         "Cross-network relay.",
         "Usage: relay <protocol:address> <message>",

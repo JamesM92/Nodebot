@@ -9,3 +9,16 @@ dependencies = [
     "lxmf>=0.9.4",
     "rns>=1.1.4",
 ]
+
+[tool.ruff.lint]
+# E/F/W: standard pycodestyle + pyflakes rules.
+# E701/E702 (colon/semicolon on one line) are intentionally used in map_gen.py
+# for aligned geometry variable assignment — suppressed per-file below.
+select = ["E", "F", "W"]
+ignore = ["E501"]   # line length — not enforced in this project
+
+[tool.ruff.lint.per-file-ignores]
+# map_gen.py uses ; to align paired variable assignments in geometry loops.
+"nodebot/map_gen.py" = ["E701", "E702"]
+# meshcore_adapter.py uses compact if-on-one-line for bit-flag parsing.
+"nodebot/transports/meshcore_adapter.py" = ["E701"]
