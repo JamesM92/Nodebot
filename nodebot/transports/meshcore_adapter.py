@@ -275,6 +275,8 @@ class MeshCoreAdapter:
                     _last_ping         = time.time()
                     _last_ann          = time.time()
                     _last_stale_reset  = time.time()
+                    _last_stats_poll   = time.time()
+                    _last_recv_count   = None   # for lockup discrimination via packet stats
                     _POLL_SECS = 5.0
                     _last_poll = asyncio.get_event_loop().time()
                     self._last_rf_event   = time.time()
@@ -352,6 +354,48 @@ class MeshCoreAdapter:
                             try:
                                 await self._mc.commands.get_time()
                                 self._last_rf_event = now
+                            except Exception:
+                                pass
+
+                        # Periodic radio health poll — every 5 min, query packet and radio
+                        # stats from firmware.  The 'recv' counter counts ALL decoded packets
+                        # (adverts, paths, DMs to other nodes, etc.), not just channel text.
+                        # So recv growing while rflog is silent means the radio IS receiving —
+                        # it's a quiet channel, not an AGC lockup.  We use this to reset the
+                        # lockup timer and avoid a false-positive reboot.
+                        if now - _last_stats_poll >= 5 * 60:
+                            _last_stats_poll = now
+                            try:
+                                sp = await self._mc.commands.get_stats_packets()
+                                sr = await self._mc.commands.get_stats_radio()
+
+                                if sp and sp.payload:
+                                    recv        = sp.payload.get('recv', 0)
+                                    recv_errors = sp.payload.get('recv_errors', 0)
+                                    if _last_recv_count is not None:
+                                        delta = recv - _last_recv_count
+                                        if delta > 0:
+                                            # Radio decoded new packets — definitely not deaf.
+                                            # Reset lockup timer so we don't reboot unnecessarily.
+                                            self._last_log_data       = now
+                                            self._lockup_reboot_count = 0
+                                            print(f"[meshcore_adapter] radio healthy: "
+                                                  f"+{delta} packets recv'd (total={recv}, "
+                                                  f"errors={recv_errors}) — not an AGC lockup")
+                                        else:
+                                            print(f"[meshcore_adapter] radio stats: "
+                                                  f"recv frozen at {recv} (errors={recv_errors})"
+                                                  f" — network quiet or lockup")
+                                    _last_recv_count = recv
+
+                                if sr and sr.payload:
+                                    noise = sr.payload.get('noise_floor', 0)
+                                    rssi  = sr.payload.get('last_rssi',   0)
+                                    tx_s  = sr.payload.get('tx_air_secs', 0)
+                                    rx_s  = sr.payload.get('rx_air_secs', 0)
+                                    print(f"[meshcore_adapter] radio stats: "
+                                          f"noise={noise}dBm last_rssi={rssi}dBm "
+                                          f"tx_air={tx_s}s rx_air={rx_s}s")
                             except Exception:
                                 pass
 
