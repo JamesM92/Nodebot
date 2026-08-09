@@ -25,13 +25,23 @@ map_type     = sys.argv[4] if len(sys.argv) > 4 else "node"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# How many active (non-outage) days to show on the maps.  The lookback window
+# is extended automatically to skip over any downtime gaps.
+import configparser as _cp
+_cfg = _cp.ConfigParser()
+_cfg.read(os.path.join(os.path.dirname(__file__), "..", "config.ini"))
+try:
+    _target_days = int(_cfg.get("logging", "map_active_days", fallback="7"))
+except (ValueError, _cp.Error):
+    _target_days = 7
+
 try:
     from nodebot import map_gen
     map_gen.init(storage_path)
-    # Dynamically extend the lookback to cover 7 days of actual activity,
+    # Dynamically extend the lookback to cover _target_days of actual activity,
     # automatically skipping over any outage gaps.
     _ann_files = map_gen._announce_db_files(announce_db)
-    _days = map_gen._active_lookback_days(_ann_files, target_days=7)
+    _days = map_gen._active_lookback_days(_ann_files, target_days=_target_days)
     if map_type == "paths":
         map_gen.generate_path_map(announce_db, days=_days)
     elif map_type == "county":
