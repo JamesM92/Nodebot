@@ -138,7 +138,7 @@ def _states_geojson():
     path = os.path.join(_storage_path, "geodata", "us_states.json")
     if not os.path.isfile(path):
         print(f"[map_gen] downloading state boundaries to {path}")
-        urllib.request.urlretrieve(_STATES_URL, path + ".tmp")
+        urllib.request.urlretrieve(_STATES_URL, path + ".tmp")  # nosec B310 — hardcoded HTTPS URL
         os.replace(path + ".tmp", path)
     with open(path) as f:
         return json.load(f)
@@ -149,7 +149,7 @@ def _counties_geojson():
     path = os.path.join(_storage_path, "geodata", "us_counties.json")
     if not os.path.isfile(path):
         print(f"[map_gen] downloading county boundaries to {path}")
-        urllib.request.urlretrieve(_COUNTIES_URL, path + ".tmp")
+        urllib.request.urlretrieve(_COUNTIES_URL, path + ".tmp")  # nosec B310 — hardcoded HTTPS URL
         os.replace(path + ".tmp", path)
     with open(path) as f:
         return json.load(f)
@@ -973,7 +973,7 @@ def _parse_paths_from_messages(messages_db):
         for table in tables:
             try:
                 rows = conn.execute(
-                    f'SELECT text, rssi FROM "{table}" ORDER BY id DESC LIMIT 2000'
+                    f'SELECT text, rssi FROM "{table}" ORDER BY id DESC LIMIT 2000'  # nosec B608
                 ).fetchall()
                 for text, rssi in rows:
                     if text and "Path:" in text:

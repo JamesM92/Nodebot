@@ -22,7 +22,8 @@ from .. import paths
 from .. import path_discovery
 
 
-CHAN_SOCK_PATH  = "/tmp/nodebot_chan.sock"
+import tempfile as _tempfile
+CHAN_SOCK_PATH  = os.path.join(_tempfile.gettempdir(), "nodebot_chan.sock")
 CHAN_BUFFER_MAX = 500
 
 _LOG_DATA_STALE_SECS = 90        # fallback AGC reset if no LOG_DATA events for 90s

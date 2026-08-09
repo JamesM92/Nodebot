@@ -150,14 +150,14 @@ def _maybe_trim(db_key, table):
 
     conn = _conns[db_key]
 
-    n = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    n = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]  # nosec B608
     if n > _ROWS_PER_TABLE:
         to_drop = n - _ROWS_KEEP
         conn.execute(f"""
             DELETE FROM "{table}" WHERE id IN (
                 SELECT id FROM "{table}" ORDER BY id ASC LIMIT ?
             )
-        """, (to_drop,))
+        """, (to_drop,))  # nosec B608 — table is an internal channel name, double-quoted
         print(f"[messages] trimmed {to_drop} rows from {db_key}/{table} (was {n})")
 
     if _db_bytes(db_key) > _MAX_BYTES:
@@ -175,7 +175,7 @@ def _evict_db(db_key, conn):
             DELETE FROM "{name}" WHERE id IN (
                 SELECT id FROM "{name}" ORDER BY id ASC LIMIT ?
             )
-        """, (per_table,))
+        """, (per_table,))  # nosec B608 — name read from sqlite_master, double-quoted
     conn.commit()
     mb = _db_bytes(db_key) / (1024 * 1024)
     print(
@@ -202,7 +202,7 @@ def log(tag, addr, text, *, display=None, nick=None, short_name=None,
         conn = _open_db(db_key)
         _ensure_table(conn, table, display)
         conn.execute(
-            f'INSERT INTO "{table}" '
+            f'INSERT INTO "{table}" '  # nosec B608 — table is an internal channel name
             f'(ts, addr, nick, short_name, text, hops, rssi, snr) '
             f'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             (now, addr, nick, short_name, text, hops, rssi, snr)
@@ -233,7 +233,7 @@ def recent(tag, limit=50):
         conn = _open_db(db_key)
         try:
             rows = conn.execute(
-                f'SELECT id, ts, addr, nick, short_name, text, hops, rssi, snr '
+                f'SELECT id, ts, addr, nick, short_name, text, hops, rssi, snr '  # nosec B608
                 f'FROM "{table}" ORDER BY id DESC LIMIT ?',
                 (limit,)
             ).fetchall()
