@@ -26,10 +26,13 @@ import tempfile as _tempfile
 CHAN_SOCK_PATH  = os.path.join(_tempfile.gettempdir(), "nodebot_chan.sock")
 CHAN_BUFFER_MAX = 500
 
-_LOG_DATA_STALE_SECS = 90        # fallback AGC reset if no LOG_DATA events for 90s
-                                 # firmware handles lockup in ≤90s via _agc_block_count;
-                                 # this is a belt-and-suspenders Python-side safety net
-_AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive failed resets
+_LOG_DATA_STALE_SECS = 90        # keepalive TX if no LOG_DATA events for this long
+_AGC_LOCKUP_SECS     = 10 * 60  # firmware reboot if still no rflog after this long;
+                                 # stock Companion Radio firmware has no Calibrate(0x7F)
+                                 # so TX alone cannot break an AGC lockup — only a reboot
+                                 # can restore RX.  10 min gives quiet networks a fair
+                                 # window before assuming lockup.
+_AGC_DEAD_COUNT      = 3        # firmware reboot after this many consecutive TX failures
 _PING_SECS           = 3 * 60   # get_time() health probe when channel is quiet
 _WATCHDOG_SECS       = 25 * 60  # reconnect if no RF events in this window
 _PERIODIC_ANN_SECS   = 12 * 3600
@@ -289,19 +292,32 @@ class MeshCoreAdapter:
                                     Event(EventType.MESSAGES_WAITING, {})
                                 )
 
-                        # Fallback AGC reset — firmware handles lockup via _agc_block_count
-                        # (forces Calibrate(0x7F) after 3 blocked attempts / ~90s).
-                        # This Python-side check catches remaining edge cases and reboots
-                        # the firmware only if TX itself is failing (real lockup), not
-                        # merely because the network is quiet (no nearby nodes to hear us).
-                        if (now - self._last_log_data >= _LOG_DATA_STALE_SECS
+                        # Two-tier AGC recovery for stock Companion Radio firmware.
+                        #
+                        # Tier 1 — keepalive TX every 90 s of rflog silence:
+                        #   Proves the radio can TX.  Does NOT prove RX is working —
+                        #   SX126x AGC lockup is RX-only; TX still succeeds while deaf.
+                        #
+                        # Tier 2 — firmware reboot after _AGC_LOCKUP_SECS of rflog silence:
+                        #   Stock firmware has no Calibrate(0x7F) after TX, so TX alone
+                        #   cannot break an AGC lockup.  A firmware reboot is the only
+                        #   recovery on stock hardware.  _AGC_LOCKUP_SECS gives quiet
+                        #   networks a fair window before assuming lockup.
+                        silence = now - self._last_log_data
+                        if silence >= _AGC_LOCKUP_SECS:
+                            # Extended silence — reboot to restore RX regardless of TX health.
+                            mins = int(silence // 60)
+                            print(f"[meshcore_adapter] AGC lockup assumed: no rflog for "
+                                  f"{mins} min — rebooting firmware to restore RX")
+                            self._last_log_data       = time.time()
+                            self._agc_reset_count     = 0
+                            self._pool_tainted        = True
+                            self._reconnect_requested = True
+                        elif (silence >= _LOG_DATA_STALE_SECS
                                 and now - _last_stale_reset >= 30):
                             _last_stale_reset = now
                             try:
                                 await self._mc.commands.send_advert(flood=False)
-                                # TX succeeded — radio is functional, just a quiet network.
-                                # Reset the stale clock so we don't loop; clear fail count.
-                                self._last_log_data   = time.time()
                                 self._agc_reset_count = 0
                                 print("[meshcore_adapter] AGC keepalive TX (no rflog "
                                       "for 90+ s, radio healthy — quiet network)")
@@ -309,7 +325,7 @@ class MeshCoreAdapter:
                                 # TX failed — radio may be genuinely stuck; count it.
                                 self._agc_reset_count += 1
                                 if self._agc_reset_count >= _AGC_DEAD_COUNT:
-                                    print(f"[meshcore_adapter] AGC unrecoverable after "
+                                    print(f"[meshcore_adapter] AGC unrecoverable: "
                                           f"{self._agc_reset_count} TX failures — rebooting firmware")
                                     self._agc_reset_count    = 0
                                     self._pool_tainted        = True
