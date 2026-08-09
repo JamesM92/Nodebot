@@ -372,6 +372,10 @@ class MeshCoreAdapter:
                                 if sp and sp.payload:
                                     recv        = sp.payload.get('recv', 0)
                                     recv_errors = sp.payload.get('recv_errors', 0)
+                                    agc_resets  = sp.payload.get('agc_resets')   # None on stock fw
+                                    agc_forced  = sp.payload.get('agc_forced')   # None on stock fw
+                                    agc_info    = (f" agc_resets={agc_resets} agc_forced={agc_forced}"
+                                                   if agc_resets is not None else "")
                                     if _last_recv_count is not None:
                                         delta = recv - _last_recv_count
                                         if delta > 0:
@@ -381,11 +385,14 @@ class MeshCoreAdapter:
                                             self._lockup_reboot_count = 0
                                             print(f"[meshcore_adapter] radio healthy: "
                                                   f"+{delta} packets recv'd (total={recv}, "
-                                                  f"errors={recv_errors}) — not an AGC lockup")
+                                                  f"errors={recv_errors}){agc_info} — not an AGC lockup")
                                         else:
                                             print(f"[meshcore_adapter] radio stats: "
                                                   f"recv frozen at {recv} (errors={recv_errors})"
-                                                  f" — network quiet or lockup")
+                                                  f"{agc_info} — network quiet or lockup")
+                                    else:
+                                        print(f"[meshcore_adapter] radio stats: "
+                                              f"recv={recv} errors={recv_errors}{agc_info}")
                                     _last_recv_count = recv
 
                                 if sr and sr.payload:
