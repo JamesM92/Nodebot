@@ -61,6 +61,8 @@ class MeshtasticAdapter:
         sec = self.CONFIG_SECTION
 
         self._node_name = cfg.get("bot", "name", fallback="NodeBot").strip()
+        self.host       = cfg.get(sec, "host",     fallback="").strip() or None
+        self._tcp_port  = int(cfg.get(sec, "tcp_port", fallback="4403").strip())
         self.port       = cfg.get(sec, "port",     fallback="").strip()
         self.baudrate   = int(cfg.get(sec, "baudrate", fallback="115200").strip())
 
@@ -95,12 +97,16 @@ class MeshtasticAdapter:
             "pressure":    cfg.get("telemetry", "static_pressure",  fallback="").strip(),
         }
 
-        if not self.port:
-            print(f"[meshtastic_adapter] [{sec}] port not configured — adapter disabled")
+        if not self.host and not self.port:
+            print(f"[meshtastic_adapter] [{sec}] neither host nor port configured — adapter disabled")
             return
 
-        print(f"[meshtastic_adapter] [{sec}] port={self.port} region={self._lora_region or 'unset'} "
-              f"telemetry={self._tel_mode} gps={self._gps_mode}")
+        if self.host:
+            print(f"[meshtastic_adapter] [{sec}] host={self.host}:{self._tcp_port} (TCP) "
+                  f"region={self._lora_region or 'unset'} telemetry={self._tel_mode} gps={self._gps_mode}")
+        else:
+            print(f"[meshtastic_adapter] [{sec}] port={self.port} (serial) "
+                  f"region={self._lora_region or 'unset'} telemetry={self._tel_mode} gps={self._gps_mode}")
 
     # =====================================================
     # WORKER MANAGEMENT
@@ -108,7 +114,7 @@ class MeshtasticAdapter:
 
     def start_worker(self):
 
-        if not self.port:
+        if not self.host and not self.port:
             return
 
         if self._thread and self._thread.is_alive():
@@ -123,20 +129,29 @@ class MeshtasticAdapter:
     def _run(self):
 
         from pubsub import pub
-        import meshtastic.serial_interface
 
         _retry = 0
+        _use_tcp = bool(self.host)
 
         while self.running:
             _iface_attempt = None
             try:
-                _iface_attempt = meshtastic.serial_interface.SerialInterface(devPath=self.port)
+                if _use_tcp:
+                    import meshtastic.tcp_interface
+                    _iface_attempt = meshtastic.tcp_interface.TCPInterface(
+                        hostname=self.host, portNumber=self._tcp_port)
+                else:
+                    import meshtastic.serial_interface
+                    _iface_attempt = meshtastic.serial_interface.SerialInterface(devPath=self.port)
                 self._iface = _iface_attempt
                 time.sleep(2)  # Let the interface fully initialise
 
                 info = getattr(self._iface, "myInfo", None)
                 self._my_node_num = getattr(info, "my_node_num", None)
-                print(f"[meshtastic_adapter] connected — node {self._my_node_num:08x}" if self._my_node_num else "[meshtastic_adapter] connected")
+                _conn_desc = f"{self.host}:{self._tcp_port}" if _use_tcp else self.port
+                print(f"[meshtastic_adapter] connected via {'TCP' if _use_tcp else 'serial'} "
+                      f"({_conn_desc}) — node {self._my_node_num:08x}" if self._my_node_num else
+                      f"[meshtastic_adapter] connected via {'TCP' if _use_tcp else 'serial'} ({_conn_desc})")
                 # Read PKI public key so it can be saved for QR code generation.
                 # meshtastic's MessageToDict encodes bytes fields as standard base64
                 # strings, so publicKey arrives as str not bytes.
@@ -187,21 +202,21 @@ class MeshtasticAdapter:
                 if not self.running:
                     break
 
-                # _on_disconnect clears self._iface but the object's reader thread
-                # still holds the serial port open. Close all SerialInterface
-                # instances via the GC graph before the next connect attempt.
-                try:
-                    import gc
-                    import meshtastic.serial_interface as _msi
-                    for obj in gc.get_objects():
-                        if isinstance(obj, _msi.SerialInterface):
-                            try:
-                                obj.close()
-                            except Exception:
-                                pass
-                    gc.collect()
-                except Exception:
-                    pass
+                # Serial only: reader thread holds the port open exclusively.
+                # Walk GC graph to close any orphaned SerialInterface instances.
+                if not _use_tcp:
+                    try:
+                        import gc
+                        import meshtastic.serial_interface as _msi
+                        for obj in gc.get_objects():
+                            if isinstance(obj, _msi.SerialInterface):
+                                try:
+                                    obj.close()
+                                except Exception:
+                                    pass
+                        gc.collect()
+                    except Exception:
+                        pass
                 self._subscribed = False
 
                 delay = min(10 * (2 ** _retry), 60)
@@ -222,23 +237,22 @@ class MeshtasticAdapter:
                             pass
                 _iface_attempt = None
                 self._iface = None
-                # SerialInterface opens the port with exclusive=True before starting
-                # a reader thread that holds a reference to self. If __init__ throws
-                # (e.g. connection timeout), the assignment never completes so we have
-                # no handle. Walk the GC object graph to find and close any orphaned
-                # SerialInterface that still holds the port open.
-                try:
-                    import gc
-                    import meshtastic.serial_interface as _msi
-                    for obj in gc.get_objects():
-                        if isinstance(obj, _msi.SerialInterface):
-                            try:
-                                obj.close()
-                            except Exception:
-                                pass
-                    gc.collect()
-                except Exception:
-                    pass
+                # Serial only: if SerialInterface.__init__ throws, the assignment
+                # never completes but the reader thread still holds the port open.
+                # Walk the GC graph to close any orphaned instances.
+                if not _use_tcp:
+                    try:
+                        import gc
+                        import meshtastic.serial_interface as _msi
+                        for obj in gc.get_objects():
+                            if isinstance(obj, _msi.SerialInterface):
+                                try:
+                                    obj.close()
+                                except Exception:
+                                    pass
+                        gc.collect()
+                    except Exception:
+                        pass
                 self._subscribed = False
                 if self.running:
                     time.sleep(delay)
