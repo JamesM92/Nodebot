@@ -3,27 +3,16 @@
 # NodeBot MeshCore Installer
 #
 # - Installs the meshcore Python package into the project venv
-# - Probes USB ports to auto-detect the MeshCore radio
-# - Creates a stable udev symlink (/dev/meshcore0) tied to the
-#   device's USB serial number so it reconnects after any replug
-# - Guides region/frequency selection and programs the radio
+# - Configures BLE address and radio parameters in config.ini
+# - Guides region/frequency selection
 # - Writes the [meshcore] section in config.ini
+#
+# Hardware: Heltec V3 running stock MeshCore unified
+#           companion+repeater firmware v1.16 (or later)
+# Transport: BLE via bleak (Nordic UART Service)
 #
 # Run AFTER install_nodebot.sh:
 #   bash installer/install_meshcore.sh
-#
-# IMPORTANT — CUSTOM FIRMWARE REQUIRED:
-#   The MeshCore adapter requires a custom Companion Radio firmware build.
-#   Stock upstream firmware does not include AGC reset support for Companion
-#   Radio, causing the SX126x to go deaf after RF interference.
-#
-#   Flash firmware from:
-#     github.com/JamesM92/MeshCore  branch: fix/agc-reset-blocked-by-sticky-irq
-#
-#   Build with PlatformIO:
-#     cd /path/to/MeshCore
-#     git checkout fix/agc-reset-blocked-by-sticky-irq
-#     pio run -e <your_device_env> -t upload
 # ============================================================
 
 set -euo pipefail
