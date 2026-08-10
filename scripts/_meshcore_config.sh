@@ -168,6 +168,7 @@ PYEOF
     echo ""
 
     # ── Write config.ini ─────────────────────────────────────
+    # port may be a serial path (/dev/…) or a BLE address (xx:xx:xx or hex string)
     "$venv_py" - <<PYEOF
 import configparser
 cfg = configparser.ConfigParser()
@@ -175,17 +176,29 @@ cfg.read('${cfg_ini}')
 sec = '${cfg_sec}'
 if sec not in cfg:
     cfg.add_section(sec)
-cfg.set(sec, 'port',     '${port}')
-cfg.set(sec, 'baudrate', '115200')
+port = '${port}'
+if port.startswith('/dev/'):
+    cfg.set(sec, 'port',     port)
+    cfg.set(sec, 'baudrate', '115200')
+else:
+    # BLE transport — write ble_address, remove stale port/baudrate
+    cfg.set(sec, 'ble_address', port)
+    cfg.remove_option(sec, 'port')
+    cfg.remove_option(sec, 'baudrate')
 cfg.set(sec, 'channels', '${MC_CHANNELS}')
 with open('${cfg_ini}', 'w') as f:
     cfg.write(f)
 print('  Written [${cfg_sec}] to config.ini')
 PYEOF
 
-    # ── Offer to program radio now ────────────────────────────
-    printf "  Program these settings onto the radio now? (yes/no): "
-    read -r _DO_MC_PROG || true
+    # ── Offer to program radio now (serial only) ──────────────
+    local _DO_MC_PROG="no"
+    if [[ "${port}" == /dev/* ]]; then
+        printf "  Program these settings onto the radio now? (yes/no): "
+        read -r _DO_MC_PROG || true
+    else
+        echo "  (Radio settings will be applied by NodeBot on first BLE connect.)"
+    fi
 
     if [[ "${_DO_MC_PROG,,}" == "yes" ]]; then
         if systemctl is-active --quiet nodebot 2>/dev/null; then
