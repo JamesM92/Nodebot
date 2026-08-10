@@ -1,11 +1,11 @@
-# NOTE: This adapter relies on a custom MeshCore Companion Radio firmware build.
-# Standard upstream firmware does NOT call Calibrate(0x7F) after TX on Companion Radio,
-# which causes the SX126x AGC to latch onto interference and go deaf.
-# Required firmware: github.com/JamesM92/MeshCore  branch: fix/agc-reset-blocked-by-sticky-irq
-# Key changes vs upstream:
-#   - getAGCResetInterval() = 30000  (enables 30s AGC reset timer, absent in stock companion)
-#   - resetAGC() _agc_block_count bypass (forces Calibrate(0x7F) after 3 blocked attempts)
-#   - doResetAGC() calls sx126xResetAGC() — warm sleep + Calibrate(0x7F) + re-calibrate image
+# MeshCore companion radio adapter — BLE transport (Bleak / Nordic UART Service).
+# Hardware: Heltec V3, firmware: stock MeshCore unified companion+repeater v1.16
+# Connection: BLE via bleak, address matched by scanning for "MeshCore" + ble_address prefix.
+#
+# AGC lockup note: stock Companion Radio firmware does NOT call Calibrate(0x7F) after TX;
+# the SX126x AGC can latch onto RF interference and go deaf.  The keepalive TX (send_advert
+# every 90 s of rflog silence) and firmware reboot (after _AGC_LOCKUP_SECS) below are
+# the software-only mitigations available on unmodified upstream firmware.
 
 import asyncio
 import collections
@@ -103,6 +103,8 @@ class MeshCoreAdapter:
 
         self._node_name = cfg.get("bot", "name", fallback="NodeBot").strip()
 
+        self.ble_address = cfg.get("meshcore", "ble_address", fallback="").strip() or None
+        # port/baudrate retained for GPS-scan exclusion; not used for BLE connection
         self.port     = cfg.get("meshcore", "port",     fallback="/dev/meshcore0").strip()
         self.baudrate = int(cfg.get("meshcore", "baudrate", fallback="115200"))
 
@@ -123,7 +125,7 @@ class MeshCoreAdapter:
         self._last_gps_lat = None
         self._last_gps_lon = None
 
-        print(f"[meshcore_adapter] port={self.port} baud={self.baudrate} "
+        print(f"[meshcore_adapter] ble_address={self.ble_address or '(scan)'} "
               f"gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
 
     # =====================================================
@@ -164,7 +166,7 @@ class MeshCoreAdapter:
     async def _async_main(self):
 
         from meshcore.meshcore import MeshCore
-        from meshcore.serial_cx import SerialConnection
+        from meshcore.ble_cx import BLEConnection
         from meshcore.events import EventType, Event
 
         self._send_queue = asyncio.Queue()
@@ -183,7 +185,7 @@ class MeshCoreAdapter:
             while self.running:
                 self._ready.clear()   # block _send_worker until startup completes
                 try:
-                    cx = SerialConnection(self.port, self.baudrate)
+                    cx = BLEConnection(address=self.ble_address)
                     self._mc = MeshCore(cx, auto_reconnect=True, max_reconnect_attempts=0)
 
                     self._mc.subscribe(EventType.SELF_INFO, self._on_self_info)
@@ -191,11 +193,11 @@ class MeshCoreAdapter:
                     conn_result = await self._mc.connect()
                     if conn_result is None:
                         raise RuntimeError(
-                            f"MeshCore handshake timed out on {self.port} — "
-                            f"device did not respond to APP_START. "
-                            f"Check that the correct device is in the correct USB port."
+                            f"MeshCore BLE handshake failed — no MeshCore device found "
+                            f"(ble_address={self.ble_address or 'scan'}). "
+                            f"Ensure the radio is powered, in BLE mode, and within range."
                         )
-                    print(f"[meshcore_adapter] connected to {self.port}")
+                    print(f"[meshcore_adapter] connected via BLE to {conn_result}")
                     _retry = 0
 
                     # Reboot the firmware if:
