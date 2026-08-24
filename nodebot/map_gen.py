@@ -1801,11 +1801,24 @@ def generate_path_map(announce_db, days=7):
         "meshtastic": "#44ff88", "mesh": "#44ff88",
         "lxmf": "#ffaa44",
     }
+    # Batch scatter by protocol colour — one PathCollection per group.
+    from collections import defaultdict as _dd2
+    _gps_groups: dict = _dd2(lambda: {"lons": [], "lats": [], "sizes": []})
+    _bg_labels = []  # (lon, lat, addr6, activity) for background (non-path) GPS nodes
     for proto, addr, nick, lat, lon in all_gps_nodes:
         color = _PROTO_COLORS.get(proto, "#aaaaaa")
         act   = node_activity.get(addr.lower(), (None, 0))[1]
         size  = 7 + 48 * (act / max_act_path)
-        ax.scatter(lon, lat, s=size, color=color, zorder=4, alpha=0.75,
+        _gps_groups[color]["lons"].append(lon)
+        _gps_groups[color]["lats"].append(lat)
+        _gps_groups[color]["sizes"].append(size)
+        al = addr.lower()
+        if al not in path_covered_addrs:
+            _bg_labels.append((lon, lat, al[:6], act))
+
+    for color, data in _gps_groups.items():
+        ax.scatter(data["lons"], data["lats"], s=data["sizes"],
+                   color=color, zorder=4, alpha=0.75,
                    linewidths=0.3, edgecolors="#ffffff30")
 
     # ── Layer 2: path edges — chamfered leading edge to show flow direction ─────
@@ -1937,18 +1950,10 @@ def generate_path_map(announce_db, days=7):
         ax.scatter(lon, lat, s=dot_s, color=color, zorder=5, alpha=1.0,
                    linewidths=0.8, edgecolors="#ffffff80")
 
-    # ── Layer 5: labels — every GPS node gets its 3-byte (6-char) prefix ─────
-    # Background GPS nodes not in any path: dim label
-    for proto, addr, nick, lat, lon in all_gps_nodes:
-        al = addr.lower()
-        if al in path_covered_addrs:
-            continue  # will be labelled in the path-node pass below
-        label = al[:6]
-        txt = ax.text(lon + 0.05, lat, label, fontsize=4.0, color="#666677",
-                      va="center", zorder=8)
-        txt.set_path_effects([pe.withStroke(linewidth=1.0, foreground="#1a1a2e")])
-
-    # Path nodes: bright label (GPS known = protocol color, estimated = amber)
+    # ── Layer 5: labels ───────────────────────────────────────────────────────
+    # Path nodes always get a bright label — these are the nodes the map is
+    # actually showing routes through.  GPS known = protocol colour, estimated
+    # position nodes = amber.
     for pid, (lat, lon) in path_node_coords.items():
         label = addr6_lookup.get(pid, pid)[:6]
         if pid in gps_known_ids:
@@ -1957,6 +1962,15 @@ def generate_path_map(announce_db, days=7):
         else:
             color = "#ccaa33"
         txt = ax.text(lon + 0.05, lat, label, fontsize=4.0, color=color,
+                      va="center", zorder=9)
+        txt.set_path_effects([pe.withStroke(linewidth=1.0, foreground="#1a1a2e")])
+
+    # Background GPS nodes (not in any path): dim label, top-100 most active
+    # only — the rest appear as dots.  Sorted most-active first so the busiest
+    # background nodes are identifiable without cluttering the path area.
+    _bg_labels.sort(key=lambda x: x[3], reverse=True)
+    for lon, lat, label, _act in _bg_labels[:100]:
+        txt = ax.text(lon + 0.05, lat, label, fontsize=4.0, color="#555566",
                       va="center", zorder=8)
         txt.set_path_effects([pe.withStroke(linewidth=1.0, foreground="#1a1a2e")])
 
