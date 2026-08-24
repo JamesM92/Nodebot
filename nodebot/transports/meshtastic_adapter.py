@@ -7,6 +7,13 @@ import time
 
 from .. import logger, radio_status, contacts, messages, paths, path_discovery
 
+# Cross-adapter packet deduplication.  Both MeshtasticAdapter and MeshtasticAdapter2 run
+# in the same process and import this module, so they share this module-level dict.
+# Key: (from_id_hex, packet_id_int)  —  Value: timestamp of first receipt
+# Entries older than _DEDUP_TTL_SECS are evicted on each receive to bound memory.
+_seen_mesh_packets: dict = {}
+_DEDUP_TTL_SECS = 300  # 5 minutes — comfortably beyond any Meshtastic retransmission window
+
 _PRESET_ABBR = {
     "LONG_FAST":      "LF",
     "LONG_SLOW":      "LS",
@@ -98,14 +105,14 @@ class MeshtasticAdapter:
         }
 
         if not self.host and not self.port:
-            print(f"[meshtastic_adapter] [{sec}] neither host nor port configured — adapter disabled")
+            print(f"[{self.ADAPTER_NAME}] [{sec}] neither host nor port configured — adapter disabled")
             return
 
         if self.host:
-            print(f"[meshtastic_adapter] [{sec}] host={self.host}:{self._tcp_port} (TCP) "
+            print(f"[{self.ADAPTER_NAME}] [{sec}] host={self.host}:{self._tcp_port} (TCP) "
                   f"region={self._lora_region or 'unset'} telemetry={self._tel_mode} gps={self._gps_mode}")
         else:
-            print(f"[meshtastic_adapter] [{sec}] port={self.port} (serial) "
+            print(f"[{self.ADAPTER_NAME}] [{sec}] port={self.port} (serial) "
                   f"region={self._lora_region or 'unset'} telemetry={self._tel_mode} gps={self._gps_mode}")
 
     # =====================================================
@@ -118,13 +125,13 @@ class MeshtasticAdapter:
             return
 
         if self._thread and self._thread.is_alive():
-            print("[meshtastic_adapter] worker already running")
+            print(f"[{self.ADAPTER_NAME}] worker already running")
             return
 
         self.running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        print("[meshtastic_adapter] worker started")
+        print(f"[{self.ADAPTER_NAME}] worker started")
 
     def _run(self):
 
@@ -149,9 +156,9 @@ class MeshtasticAdapter:
                 info = getattr(self._iface, "myInfo", None)
                 self._my_node_num = getattr(info, "my_node_num", None)
                 _conn_desc = f"{self.host}:{self._tcp_port}" if _use_tcp else self.port
-                print(f"[meshtastic_adapter] connected via {'TCP' if _use_tcp else 'serial'} "
-                      f"({_conn_desc}) — node {self._my_node_num:08x}" if self._my_node_num else
-                      f"[meshtastic_adapter] connected via {'TCP' if _use_tcp else 'serial'} ({_conn_desc})")
+                _node_suffix = f" — node {self._my_node_num:08x}" if self._my_node_num else ""
+                print(f"[{self.ADAPTER_NAME}] connected via {'TCP' if _use_tcp else 'serial'} "
+                      f"({_conn_desc}){_node_suffix}")
                 # Read PKI public key so it can be saved for QR code generation.
                 # meshtastic's MessageToDict encodes bytes fields as standard base64
                 # strings, so publicKey arrives as str not bytes.
@@ -221,13 +228,13 @@ class MeshtasticAdapter:
 
                 delay = min(10 * (2 ** _retry), 60)
                 _retry += 1
-                print(f"[meshtastic_adapter] disconnected — retrying in {delay}s")
+                print(f"[{self.ADAPTER_NAME}] disconnected — retrying in {delay}s")
                 time.sleep(delay)
 
             except Exception as e:
                 delay = min(10 * (2 ** _retry), 60)
                 _retry += 1
-                print(f"[meshtastic_adapter] connection error: {e} — retrying in {delay}s")
+                print(f"[{self.ADAPTER_NAME}] connection error: {e} — retrying in {delay}s")
                 radio_status.update(self.CONFIG_SECTION, "error", error=str(e))
                 for iface in (_iface_attempt, self._iface):
                     if iface is not None:
@@ -260,7 +267,7 @@ class MeshtasticAdapter:
     def _on_disconnect(self, interface, topic=None):
         if interface is not self._iface:
             return
-        print("[meshtastic_adapter] connection lost")
+        print(f"[{self.ADAPTER_NAME}] connection lost")
         radio_status.update(self.CONFIG_SECTION, "disconnected")
         try:
             if interface is not None:
@@ -303,7 +310,7 @@ class MeshtasticAdapter:
         if not self._lora_region or self._lora_configured:
             return
         if self._lora_state_matches():
-            print("[meshtastic_adapter] LoRa config unchanged, skipping write")
+            print(f"[{self.ADAPTER_NAME}] LoRa config unchanged, skipping write")
             self._lora_configured = True
             return
         try:
@@ -316,18 +323,18 @@ class MeshtasticAdapter:
             self._iface.localNode.writeConfig("lora")
             self._lora_configured = True
             self._save_lora_state()
-            print(f"[meshtastic_adapter] LoRa config applied: region={self._lora_region} "
+            print(f"[{self.ADAPTER_NAME}] LoRa config applied: region={self._lora_region} "
                   f"preset={self._lora_preset} hops={self._lora_hops} power={self._lora_power}")
         except (KeyError, ValueError) as e:
-            print(f"[meshtastic_adapter] LoRa config: invalid value — {e}")
+            print(f"[{self.ADAPTER_NAME}] LoRa config: invalid value — {e}")
         except Exception as e:
-            print(f"[meshtastic_adapter] LoRa config failed: {e}")
+            print(f"[{self.ADAPTER_NAME}] LoRa config failed: {e}")
 
     def _apply_device_config(self):
         if not self._device_role:
             return
         if self._device_role_matches_saved():
-            print(f"[meshtastic_adapter] device role unchanged ({self._device_role}), skipping write")
+            print(f"[{self.ADAPTER_NAME}] device role unchanged ({self._device_role}), skipping write")
             return
         try:
             from meshtastic import config_pb2
@@ -335,11 +342,11 @@ class MeshtasticAdapter:
             device.role = config_pb2.Config.DeviceConfig.Role.Value(self._device_role)
             self._iface.localNode.writeConfig("device")
             self._save_device_state()
-            print(f"[meshtastic_adapter] device role set: {self._device_role}")
+            print(f"[{self.ADAPTER_NAME}] device role set: {self._device_role}")
         except (KeyError, ValueError) as e:
-            print(f"[meshtastic_adapter] device config: invalid role '{self._device_role}' — {e}")
+            print(f"[{self.ADAPTER_NAME}] device config: invalid role '{self._device_role}' — {e}")
         except Exception as e:
-            print(f"[meshtastic_adapter] device config failed: {e}")
+            print(f"[{self.ADAPTER_NAME}] device config failed: {e}")
 
     def _device_role_matches_saved(self):
         try:
@@ -362,7 +369,7 @@ class MeshtasticAdapter:
             with open(self._lora_state_path(), "w") as f:
                 json.dump(existing, f)
         except Exception as e:
-            print(f"[meshtastic_adapter] failed to save device state: {e}")
+            print(f"[{self.ADAPTER_NAME}] failed to save device state: {e}")
 
     def _lora_state_path(self):
         return os.path.join(self.storage_path, f"{self.CONFIG_SECTION}_lora.json")
@@ -411,7 +418,7 @@ class MeshtasticAdapter:
             with open(self._lora_state_path(), "w") as f:
                 json.dump(existing, f)
         except Exception as e:
-            print(f"[meshtastic_adapter] failed to save device state: {e}")
+            print(f"[{self.ADAPTER_NAME}] failed to save device state: {e}")
 
     # =====================================================
     # INBOUND MESSAGE
@@ -464,6 +471,23 @@ class MeshtasticAdapter:
                 # Both missing — assume broadcast (safety fallback)
                 is_broadcast = True
 
+            # Cross-adapter packet deduplication — suppress duplicates seen by both radios.
+            # Meshtastic packet IDs are unique per (sender, message); use them as the dedup key.
+            _pkt_id  = packet.get("id")
+            _from_num_raw = packet.get("from")
+            _dedup_key = (from_id or str(_from_num_raw), _pkt_id) if _pkt_id is not None else None
+            _now_ts = time.time()
+            if _dedup_key is not None:
+                if _dedup_key in _seen_mesh_packets:
+                    # Already logged by the other adapter; suppress silently.
+                    return
+                _seen_mesh_packets[_dedup_key] = _now_ts
+                # Evict stale entries to keep the dict bounded.
+                _stale = [k for k, t in _seen_mesh_packets.items()
+                          if _now_ts - t > _DEDUP_TTL_SECS]
+                for k in _stale:
+                    del _seen_mesh_packets[k]
+
             # Log and ignore channel broadcasts
             if is_broadcast:
                 addr = from_id.lstrip("!").lower()
@@ -503,7 +527,7 @@ class MeshtasticAdapter:
                             event_type="dm")
 
             preset_abbr = _PRESET_ABBR.get(self._lora_preset.upper(), self._lora_preset)
-            print(f"[meshtastic_adapter] msg from {sender}: {text!r}")
+            print(f"[{self.ADAPTER_NAME}] msg from {sender}: {text!r}")
             logger.log_dm(f"meshtastic:{preset_abbr}", sender, text, nick=nick)
             messages.log_dm(f"meshtastic:{preset_abbr}", addr, text, nick=nick)
             path_discovery.mark_responded(addr, proto='meshtastic')
@@ -518,7 +542,7 @@ class MeshtasticAdapter:
                 )
 
         except Exception as e:
-            print(f"[meshtastic_adapter] receive error: {e}")
+            print(f"[{self.ADAPTER_NAME}] receive error: {e}")
 
     def _log_position_announce(self, packet, decoded, from_id):
         try:
@@ -557,7 +581,7 @@ class MeshtasticAdapter:
                             lat=lat, lon=lon, alt=alt, rssi=rssi, snr=snr,
                             hops=hops, battery=battery, event_type="position")
         except Exception as e:
-            print(f"[meshtastic_adapter] position announce log error: {e}")
+            print(f"[{self.ADAPTER_NAME}] position announce log error: {e}")
 
     def _log_nodeinfo_announce(self, packet, decoded, from_id):
         try:
@@ -581,7 +605,7 @@ class MeshtasticAdapter:
             contacts.upsert("mesh", addr, name=nick, short_name=short_name or None,
                             rssi=rssi, snr=snr, hops=hops, event_type="nodeinfo")
         except Exception as e:
-            print(f"[meshtastic_adapter] nodeinfo announce log error: {e}")
+            print(f"[{self.ADAPTER_NAME}] nodeinfo announce log error: {e}")
 
     def _log_telemetry(self, packet, decoded, from_id):
         try:
@@ -603,7 +627,7 @@ class MeshtasticAdapter:
                 rssi=rssi, snr=snr,
             )
         except Exception as e:
-            print(f"[meshtastic_adapter] telemetry log error: {e}")
+            print(f"[{self.ADAPTER_NAME}] telemetry log error: {e}")
 
     # =====================================================
     # OUTBOUND MESSAGE
@@ -619,12 +643,12 @@ class MeshtasticAdapter:
 
             dest = f"!{sender[5:]}" if str(sender).startswith("mesh:") else str(sender)
             self._iface.sendText(content, destinationId=dest)
-            print(f"[meshtastic_adapter] sent to {dest}")
+            print(f"[{self.ADAPTER_NAME}] sent to {dest}")
             if notify_cb:
                 notify_cb(True)
 
         except Exception as e:
-            print(f"[meshtastic_adapter] send error: {e}")
+            print(f"[{self.ADAPTER_NAME}] send error: {e}")
             if notify_cb:
                 notify_cb(False)
 
@@ -649,19 +673,19 @@ class MeshtasticAdapter:
                 lon = float(self._gps_lon)
                 alt = float(self._gps_alt or "0")
             except ValueError:
-                print("[meshtastic_adapter] GPS: invalid manual coordinates, skipping")
+                print(f"[{self.ADAPTER_NAME}] GPS: invalid manual coordinates, skipping")
                 return
 
         elif mode == "gpsd":
             lat, lon, alt = self._read_gpsd()
             if lat is None:
-                print("[meshtastic_adapter] GPS: no gpsd fix")
+                print(f"[{self.ADAPTER_NAME}] GPS: no gpsd fix")
                 return
 
         elif mode == "serial":
             lat, lon, alt = self._read_serial_gps(self._gps_device)
             if lat is None:
-                print(f"[meshtastic_adapter] GPS: no fix from {self._gps_device}")
+                print(f"[{self.ADAPTER_NAME}] GPS: no fix from {self._gps_device}")
                 return
 
         if lat is None:
@@ -681,9 +705,9 @@ class MeshtasticAdapter:
             self._last_gps_lat = lat_r
             self._last_gps_lon = lon_r
             self._last_gps_alt = int(alt_r)
-            print(f"[meshtastic_adapter] GPS pushed: lat={lat_r} lon={lon_r} alt={alt_r}")
+            print(f"[{self.ADAPTER_NAME}] GPS pushed: lat={lat_r} lon={lon_r} alt={alt_r}")
         except Exception as e:
-            print(f"[meshtastic_adapter] GPS push failed: {e}")
+            print(f"[{self.ADAPTER_NAME}] GPS push failed: {e}")
 
     def _gps_loop(self):
 
@@ -707,7 +731,7 @@ class MeshtasticAdapter:
                     last_scan = now
                     device, _baud = self._scan_for_gps()
                     if device:
-                        print(f"[meshtastic_adapter] GPS auto-discovered: {device}")
+                        print(f"[{self.ADAPTER_NAME}] GPS auto-discovered: {device}")
                         self._gps_mode = "serial"
                         self._gps_device = device
                         self._push_gps(force=True)
@@ -748,7 +772,7 @@ class MeshtasticAdapter:
 
                 if addr and self._iface and not self._disconnected.is_set():
                     dest = f"!{addr}"
-                    print(f"[meshtastic_adapter] path discovery: traceroute → {dest}")
+                    print(f"[{self.ADAPTER_NAME}] path discovery: traceroute → {dest}")
 
                     route_event = threading.Event()
                     route_data  = {}
@@ -775,7 +799,7 @@ class MeshtasticAdapter:
                             hopLimit=self._lora_hops,
                         )
                     except Exception as exc:
-                        print(f"[meshtastic_adapter] traceroute send error: {exc}")
+                        print(f"[{self.ADAPTER_NAME}] traceroute send error: {exc}")
                         route_event.set()
 
                     route_event.wait(timeout=60)
@@ -800,15 +824,15 @@ class MeshtasticAdapter:
                             path_str=path_str or "(direct)"
                         )
                         hops_note = f"{len(route)} hop(s)" if route else "direct"
-                        print(f"[meshtastic_adapter] traceroute ← {addr}: {hops_note}")
+                        print(f"[{self.ADAPTER_NAME}] traceroute ← {addr}: {hops_note}")
                     else:
-                        print(f"[meshtastic_adapter] traceroute timed out or errored: {addr}")
+                        print(f"[{self.ADAPTER_NAME}] traceroute timed out or errored: {addr}")
 
                 elif not addr:
-                    print("[meshtastic_adapter] path discovery: no candidates")
+                    print(f"[{self.ADAPTER_NAME}] path discovery: no candidates")
 
             except Exception as exc:
-                print(f"[meshtastic_adapter] path_discovery_loop error: {exc}")
+                print(f"[{self.ADAPTER_NAME}] path_discovery_loop error: {exc}")
 
             # Sleep 1 hour, checking for disconnect/shutdown every second
             for _ in range(3600):
@@ -861,12 +885,12 @@ class MeshtasticAdapter:
                 wantAck=False,
                 wantResponse=False
             )
-            print(f"[meshtastic_adapter] telemetry sent: temp={temp} hum={hum} pres={pres}")
+            print(f"[{self.ADAPTER_NAME}] telemetry sent: temp={temp} hum={hum} pres={pres}")
 
         except ImportError:
-            print("[meshtastic_adapter] telemetry_pb2 not available — library update may be needed")
+            print(f"[{self.ADAPTER_NAME}] telemetry_pb2 not available — library update may be needed")
         except Exception as e:
-            print(f"[meshtastic_adapter] telemetry send failed: {e}")
+            print(f"[{self.ADAPTER_NAME}] telemetry send failed: {e}")
 
     def _get_telemetry_data(self):
 
@@ -896,7 +920,7 @@ class MeshtasticAdapter:
             )
             return json.loads(result.stdout.strip())
         except Exception as e:
-            print(f"[meshtastic_adapter] telemetry script error: {e}")
+            print(f"[{self.ADAPTER_NAME}] telemetry script error: {e}")
             return None
 
     # =====================================================
@@ -944,14 +968,14 @@ class MeshtasticAdapter:
             if not self._node_name_matches_saved():
                 self._iface.localNode.setOwner(long_name=self._node_name)
                 self._save_lora_state(save_name=True)
-                print(f"[meshtastic_adapter] node name set: {self._node_name}")
+                print(f"[{self.ADAPTER_NAME}] node name set: {self._node_name}")
             if self._last_gps_lat is not None:
                 self._iface.localNode.setFixedPosition(
                     self._last_gps_lat, self._last_gps_lon, self._last_gps_alt or 0
                 )
-            print("[meshtastic_adapter] announced on network")
+            print(f"[{self.ADAPTER_NAME}] announced on network")
         except Exception as e:
-            print(f"[meshtastic_adapter] announce failed: {e}")
+            print(f"[{self.ADAPTER_NAME}] announce failed: {e}")
 
     def stop(self):
         self.running = False
@@ -961,4 +985,4 @@ class MeshtasticAdapter:
                 self._iface.close()
             except Exception:
                 pass
-        print("[meshtastic_adapter] stopped")
+        print(f"[{self.ADAPTER_NAME}] stopped")

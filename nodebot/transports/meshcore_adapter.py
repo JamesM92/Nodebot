@@ -6,6 +6,12 @@
 # the SX126x AGC can latch onto RF interference and go deaf.  The keepalive TX (send_advert
 # every 90 s of rflog silence) and firmware reboot (after _AGC_LOCKUP_SECS) below are
 # the software-only mitigations available on unmodified upstream firmware.
+#
+# Quiet-network disambiguation: a frozen recv counter could mean AGC lockup OR a quiet
+# network.  We use the noise floor to tell them apart: a locked AGC shows noise > -105 dBm
+# (stuck at low sensitivity); a healthy receiver on a silent network shows < -110 dBm.
+# When noise < -110 and recv is frozen, the lockup timer is reset rather than triggering
+# an unnecessary reboot that would cause missed messages during the reconnect window.
 
 import asyncio
 import collections
@@ -83,6 +89,9 @@ class MeshCoreAdapter:
         self._send_queue          = None   # asyncio.Queue, created inside event loop
         self._reconnect_requested = False  # set by _send_one to break inner loop
         self._pool_tainted        = False  # TABLE_FULL exhausted retries — firmware reboot needed
+        self._force_radio_recal   = False  # force set_radio() on next connect to attempt SX1262 modem
+                                           # re-init after a lockup-triggered reboot; set alongside
+                                           # _pool_tainted when AGC lockup is detected
         self._ready               = None   # asyncio.Event; set when startup complete, cleared on reconnect
         self._last_rf_event  = time.time()
         self._last_log_data  = time.time()
@@ -95,6 +104,11 @@ class MeshCoreAdapter:
         self._recent_msgs      = {}
         self._recent_chan_msgs = {}
         self._seen_contacts    = {}
+        # Tracks {pubkey: last_advert_timestamp} so the 5-min poll can detect
+        # when a known contact has re-advertised.  The firmware does not push
+        # ADVERTISEMENT (0x80) events for known contacts in practice, so we diff
+        # the contacts list periodically instead.
+        self._contact_advert_seen: dict = {}
 
         _here = os.path.dirname(os.path.abspath(__file__))
         _config_path = os.path.join(_here, "..", "..", "config.ini")
@@ -104,7 +118,10 @@ class MeshCoreAdapter:
         self._node_name = cfg.get("bot", "name", fallback="NodeBot").strip()
 
         self.ble_address = cfg.get("meshcore", "ble_address", fallback="").strip() or None
-        # port/baudrate retained for GPS-scan exclusion; not used for BLE connection
+        self.host        = cfg.get("meshcore", "host",     fallback="").strip() or None
+        self.tcp_port    = int(cfg.get("meshcore", "tcp_port", fallback="5000"))
+        self._use_tcp    = bool(self.host)
+        # port/baudrate retained for GPS-scan exclusion; not used for BLE/TCP connection
         self.port     = cfg.get("meshcore", "port",     fallback="/dev/meshcore0").strip()
         self.baudrate = int(cfg.get("meshcore", "baudrate", fallback="115200"))
 
@@ -125,8 +142,12 @@ class MeshCoreAdapter:
         self._last_gps_lat = None
         self._last_gps_lon = None
 
-        print(f"[meshcore_adapter] ble_address={self.ble_address or '(scan)'} "
-              f"gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
+        if self._use_tcp:
+            print(f"[meshcore_adapter] transport=TCP host={self.host}:{self.tcp_port} "
+                  f"gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
+        else:
+            print(f"[meshcore_adapter] transport=BLE ble_address={self.ble_address or '(scan)'} "
+                  f"gps_mode={self._gps_mode} gps_precision={self._gps_precision}")
 
     # =====================================================
     # HEALTH
@@ -167,6 +188,7 @@ class MeshCoreAdapter:
 
         from meshcore.meshcore import MeshCore
         from meshcore.ble_cx import BLEConnection
+        from meshcore.tcp_cx import TCPConnection
         from meshcore.events import EventType, Event
 
         self._send_queue = asyncio.Queue()
@@ -185,50 +207,76 @@ class MeshCoreAdapter:
             while self.running:
                 self._ready.clear()   # block _send_worker until startup completes
                 try:
-                    cx = BLEConnection(address=self.ble_address)
+                    if self._use_tcp:
+                        # TCP transport — no BlueZ session to clear
+                        cx = TCPConnection(self.host, self.tcp_port)
+                    else:
+                        # BLE transport — disconnect any stale BlueZ session from a
+                        # previous NodeBot process; BlueZ retains connections after exit.
+                        if self.ble_address:
+                            try:
+                                _disc = await asyncio.create_subprocess_exec(
+                                    "bluetoothctl", "disconnect", self.ble_address,
+                                    stdout=asyncio.subprocess.DEVNULL,
+                                    stderr=asyncio.subprocess.DEVNULL,
+                                )
+                                await asyncio.wait_for(_disc.wait(), timeout=5.0)
+                                await asyncio.sleep(0.3)
+                            except Exception:
+                                pass
+                        cx = BLEConnection(address=self.ble_address)
+
                     self._mc = MeshCore(cx, auto_reconnect=True, max_reconnect_attempts=0)
 
                     self._mc.subscribe(EventType.SELF_INFO, self._on_self_info)
 
                     conn_result = await self._mc.connect()
                     if conn_result is None:
-                        raise RuntimeError(
-                            f"MeshCore BLE handshake failed — no MeshCore device found "
-                            f"(ble_address={self.ble_address or 'scan'}). "
-                            f"Ensure the radio is powered, in BLE mode, and within range."
-                        )
-                    print(f"[meshcore_adapter] connected via BLE to {conn_result}")
+                        if self._use_tcp:
+                            raise RuntimeError(
+                                f"MeshCore TCP handshake failed — could not reach "
+                                f"{self.host}:{self.tcp_port}. "
+                                f"Ensure the radio is on the AP and listening."
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"MeshCore BLE handshake failed — no MeshCore device found "
+                                f"(ble_address={self.ble_address or 'scan'}). "
+                                f"Ensure the radio is powered, in BLE mode, and within range."
+                            )
+                    transport = "TCP" if self._use_tcp else "BLE"
+                    print(f"[meshcore_adapter] connected via {transport} to {conn_result}")
                     _retry = 0
 
-                    # Reboot the firmware if:
-                    #   a) first boot and firmware has been running a while
-                    #      (stale pool slots from a previous Python session), OR
-                    #   b) TABLE_FULL exhausted all retry attempts — _pool_tainted
-                    #      is set so we know the 16-slot pool needs a hard reset.
-                    # Python-side reconnect alone does NOT clear the pool; only a
-                    # firmware reboot (ESP32 reset) returns all slots to unused[].
-                    if _first_boot or self._pool_tainted:
-                        _first_boot = False
+                    # Reboot the firmware ONLY when TABLE_FULL has been observed
+                    # (_pool_tainted).  Speculative reboots on first-boot were
+                    # removed because:
+                    #   • A firmware soft-reboot (ESP32 reset) does NOT power-cycle
+                    #     the SX1262.  If the AGC was locked before the reboot, it
+                    #     stays locked after — causing recv=0 indefinitely.
+                    #   • TABLE_FULL is reliably detected mid-session and sets
+                    #     _pool_tainted; that's the correct trigger for a reboot.
+                    #   • Pool slots left by a previous session are timed out by the
+                    #     firmware itself; a speculative reboot is not needed.
+                    _first_boot = False
+                    if self._pool_tainted:
                         self._pool_tainted = False
-                        uptime = 999
+                        uptime = 0
                         try:
                             cs = await self._mc.commands.get_stats_core()
                             if cs and cs.payload:
-                                uptime = cs.payload.get("uptime_secs", 999)
+                                uptime = cs.payload.get("uptime_secs", 0)
                         except Exception:
                             pass
-                        if uptime > 30:
-                            print(f"[meshcore_adapter] startup: firmware uptime={uptime}s — rebooting to clear stale pool state")
-                            try:
-                                await self._mc.commands.reboot()
-                            except Exception:
-                                pass
-                            await self._mc.disconnect()
-                            self._mc = None
-                            await asyncio.sleep(8)
-                            continue
-                        else:
-                            print(f"[meshcore_adapter] startup: firmware uptime={uptime}s — pool is fresh, no reboot needed")
+                        print(f"[meshcore_adapter] startup: pool tainted — rebooting firmware to clear TX pool (uptime={uptime}s)")
+                        try:
+                            await self._mc.commands.reboot()
+                        except Exception:
+                            pass
+                        await self._mc.disconnect()
+                        self._mc = None
+                        await asyncio.sleep(8)
+                        continue
 
                     await asyncio.sleep(0.2)
 
@@ -318,17 +366,44 @@ class MeshCoreAdapter:
                             else _AGC_LOCKUP_SECS * 6   # 60 min — safety-net reboot only
                         )
                         if silence >= _effective_lockup_secs:
-                            # Extended silence — reboot to restore RX regardless of TX health.
+                            # Before committing to a reboot, take a fresh noise floor
+                            # reading.  A real AGC lockup shows elevated noise (> -105 dBm);
+                            # a healthy receiver on a genuinely silent mesh shows -115 to
+                            # -118 dBm.  noise=0 means the firmware hasn't sampled it yet
+                            # (too early in the session to have had any RX event).
+                            # In either healthy case, reset the silence clock instead of
+                            # rebooting — this also closes the race where the stats-poll
+                            # timer-reset fires in the same loop iteration as the lockup
+                            # timer, but the lockup check executes first.
+                            _lockup_noise = 0
+                            try:
+                                _sr_chk = await self._mc.commands.get_stats_radio()
+                                _lockup_noise = (_sr_chk.payload.get('noise_floor', 0)
+                                                 if _sr_chk and _sr_chk.payload else 0)
+                            except Exception:
+                                pass
+
                             mins = int(silence // 60)
-                            tier = "safety-net" if self._lockup_reboot_count > 0 else "lockup"
-                            print(f"[meshcore_adapter] AGC {tier}: no rflog for "
-                                  f"{mins} min — rebooting firmware to restore RX "
-                                  f"(reboot #{self._lockup_reboot_count + 1})")
-                            self._last_log_data        = time.time()
-                            self._agc_reset_count      = 0
-                            self._lockup_reboot_count += 1
-                            self._pool_tainted         = True
-                            self._reconnect_requested  = True
+                            if _lockup_noise == 0 or _lockup_noise < -110:
+                                # Healthy (or unsampled) noise floor — quiet network,
+                                # NOT an AGC lockup.  Reset the timer; do not reboot.
+                                self._last_log_data = time.time()
+                                print(f"[meshcore_adapter] AGC timer: {mins} min silence "
+                                      f"but noise={_lockup_noise}dBm — quiet network, "
+                                      f"no lockup — timer reset, no reboot")
+                            else:
+                                # Elevated noise floor confirms the AGC is stuck.
+                                tier = "safety-net" if self._lockup_reboot_count > 0 else "lockup"
+                                print(f"[meshcore_adapter] AGC {tier}: no rflog for "
+                                      f"{mins} min, noise={_lockup_noise}dBm — rebooting "
+                                      f"firmware to restore RX "
+                                      f"(reboot #{self._lockup_reboot_count + 1})")
+                                self._last_log_data        = time.time()
+                                self._agc_reset_count      = 0
+                                self._lockup_reboot_count += 1
+                                self._pool_tainted         = True
+                                self._force_radio_recal    = True  # SX1262 modem re-init
+                                self._reconnect_requested  = True
                         elif (silence >= _LOG_DATA_STALE_SECS
                                 and now - _last_stale_reset >= 30):
                             _last_stale_reset = now
@@ -345,6 +420,7 @@ class MeshCoreAdapter:
                                           f"{self._agc_reset_count} TX failures — rebooting firmware")
                                     self._agc_reset_count    = 0
                                     self._pool_tainted        = True
+                                    self._force_radio_recal   = True  # SX1262 modem re-init on recovery
                                     self._reconnect_requested = True
                                 else:
                                     print(f"[meshcore_adapter] AGC reset TX failed "
@@ -371,6 +447,13 @@ class MeshCoreAdapter:
                                 sp = await self._mc.commands.get_stats_packets()
                                 sr = await self._mc.commands.get_stats_radio()
 
+                                # Read noise floor now so we can use it inside the
+                                # recv-frozen branch to distinguish a quiet network
+                                # (noise < -110 dBm, healthy AGC) from a real lockup
+                                # (noise > -105 dBm, AGC stuck at low sensitivity).
+                                _noise_now = (sr.payload.get('noise_floor', 0)
+                                              if sr and sr.payload else 0)
+
                                 if sp and sp.payload:
                                     recv        = sp.payload.get('recv', 0)
                                     recv_errors = sp.payload.get('recv_errors', 0)
@@ -388,10 +471,25 @@ class MeshCoreAdapter:
                                             print(f"[meshcore_adapter] radio healthy: "
                                                   f"+{delta} packets recv'd (total={recv}, "
                                                   f"errors={recv_errors}){agc_info} — not an AGC lockup")
+                                        elif _noise_now == 0 or _noise_now < -110:
+                                            # noise=0: firmware hasn't sampled the noise floor
+                                            # yet (no RX events this session) — unsampled, not
+                                            # a lockup indicator.
+                                            # noise < -110: healthy receiver, quiet network.
+                                            # Either way, NOT an AGC lockup — reset the timer.
+                                            self._last_log_data       = now
+                                            self._lockup_reboot_count = 0
+                                            noise_desc = (f"{_noise_now}dBm"
+                                                          if _noise_now else "unsampled")
+                                            print(f"[meshcore_adapter] radio stats: "
+                                                  f"recv frozen at {recv}{agc_info} — "
+                                                  f"noise={noise_desc} (healthy/quiet) "
+                                                  f"— lockup timer reset, no reboot")
                                         else:
                                             print(f"[meshcore_adapter] radio stats: "
                                                   f"recv frozen at {recv} (errors={recv_errors})"
-                                                  f"{agc_info} — network quiet or lockup")
+                                                  f"{agc_info} noise={_noise_now}dBm "
+                                                  f"— possible AGC lockup")
                                     else:
                                         print(f"[meshcore_adapter] radio stats: "
                                               f"recv={recv} errors={recv_errors}{agc_info}")
@@ -407,6 +505,32 @@ class MeshCoreAdapter:
                                           f"tx_air={tx_s}s rx_air={rx_s}s")
                             except Exception:
                                 pass
+
+                            # Contact advert-diff: detect known contacts that
+                            # re-advertised since our last poll.  The firmware
+                            # does not push ADVERTISEMENT events for these, so
+                            # we fetch the full contacts list and compare
+                            # last_advert timestamps.
+                            try:
+                                await self._mc.commands.get_contacts()
+                                for pk, c in list(self._mc.contacts.items()):
+                                    last_adv = c.get("last_advert", 0)
+                                    if last_adv > self._contact_advert_seen.get(pk, 0):
+                                        self._contact_advert_seen[pk] = last_adv
+                                        nick = c.get("adv_name", "").replace("\0", "").strip() or None
+                                        if not nick:
+                                            continue
+                                        addr = pk[:12]
+                                        lat  = c.get("adv_lat") or None
+                                        lon  = c.get("adv_lon") or None
+                                        if lat == 0.0: lat = None
+                                        if lon == 0.0: lon = None
+                                        logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon)
+                                        contacts.upsert("mc", addr, pubkey=pk, name=nick,
+                                                        lat=lat, lon=lon, event_type="advert")
+                                        print(f"[meshcore_adapter] advert-poll: {nick} ({addr})")
+                            except Exception as e:
+                                print(f"[meshcore_adapter] advert-poll error: {e}")
 
                         # Reconnect requested by _send_one (AGC lockup detected)
                         if self._reconnect_requested:
@@ -471,6 +595,42 @@ class MeshCoreAdapter:
     async def _apply_radio_params(self):
         try:
             from meshcore.events import EventType
+
+            # Skip the set_radio() call if firmware already has the right config.
+            # Sending set_radio() with identical params causes the firmware to
+            # restart the SX1262 modem unnecessarily, which can disrupt RX.
+            #
+            # Exception: _force_radio_recal is set when a lockup-triggered reboot
+            # just ran.  The ESP32 soft-reset does NOT power-cycle the SX1262, so
+            # the AGC/modem state may still be frozen.  Forcing set_radio() here
+            # re-runs RadioLib's full modem init sequence (standby → set params →
+            # re-enter RX) which can unstick a frozen RX state even without the
+            # full Calibrate(0x7F) that the Repeater firmware uses.
+            force = self._force_radio_recal
+            self._force_radio_recal = False
+
+            si = self._mc.self_info or {}
+            fw_freq   = si.get("radio_freq")
+            fw_bw     = si.get("radio_bw")
+            fw_sf     = si.get("radio_sf")
+            fw_cr     = si.get("radio_cr")
+            unchanged = (
+                fw_freq == self._radio_freq and
+                fw_bw   == self._radio_bw   and
+                fw_sf   == self._radio_sf   and
+                fw_cr   == self._radio_cr
+                # repeat is not in self_info — always apply if other params changed
+            )
+            if unchanged and not force:
+                print(f"[meshcore_adapter] radio config unchanged "
+                      f"({self._radio_freq}/{self._radio_bw}/SF{self._radio_sf}/CR{self._radio_cr})"
+                      f" — skipping set_radio to preserve RX state")
+                return
+            if force:
+                print(f"[meshcore_adapter] radio recal forced after lockup reboot "
+                      f"({self._radio_freq}/{self._radio_bw}/SF{self._radio_sf}/CR{self._radio_cr})"
+                      f" — calling set_radio to attempt SX1262 modem re-init")
+
             result = await self._mc.commands.set_radio(
                 self._radio_freq, self._radio_bw,
                 self._radio_sf,   self._radio_cr,
@@ -824,11 +984,19 @@ class MeshCoreAdapter:
         if seeded:
             print(f"[meshcore_adapter] seeded position estimates for {seeded} nodes")
 
+        # Seed advert-seen timestamps so the periodic poll can detect future re-adverts.
+        self._contact_advert_seen = {
+            pk: c.get("last_advert", 0)
+            for pk, c in self._mc.contacts.items()
+        }
+
     async def _on_new_contact(self, event):
         """Log an announce when an RF advertisement is received (flood or zero-hop).
 
         PUSH_CODE_NEW_ADVERT packets dispatch NEW_CONTACT — the payload contains
         adv_name/adv_lat/adv_lon directly so no contacts dict lookup is needed.
+        After logging, refresh the contacts snapshot so future DMs from this
+        newly-seen node don't hit a stale-lookup miss.
         """
         try:
             c = event.payload
@@ -848,6 +1016,12 @@ class MeshCoreAdapter:
             logger.log_announce("meshcore", addr, nick=nick, lat=lat, lon=lon)
             contacts.upsert("mc", addr, pubkey=pk, name=nick, lat=lat, lon=lon,
                             event_type="advert")
+            # Refresh contacts snapshot so this new node is reachable for DMs.
+            if self._mc:
+                try:
+                    await self._mc.ensure_contacts()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[meshcore_adapter] new_contact announce error: {e}")
 
@@ -858,6 +1032,14 @@ class MeshCoreAdapter:
             if not pk or not self._mc:
                 return
             contact = self._mc.contacts.get(pk) or self._mc._pending_contacts.get(pk)
+            if contact is None:
+                # Contact was added to firmware after our startup snapshot — refresh
+                # so we can log their name/position and handle future DMs correctly.
+                try:
+                    await self._mc.ensure_contacts()
+                    contact = self._mc.contacts.get(pk) or self._mc._pending_contacts.get(pk)
+                except Exception:
+                    pass
             if not contact:
                 return
             nick = contact.get("adv_name", "").replace("\0", "").strip() or None
@@ -937,6 +1119,13 @@ class MeshCoreAdapter:
             paths.log(text, sender_id=pubkey_prefix, our_id=_our_id)
             path_discovery.mark_responded(pubkey_prefix)
             contact = self._mc.get_contact_by_key_prefix(pubkey_prefix) if self._mc else None
+            if contact is None and self._mc:
+                # Contact was added to firmware after our startup snapshot — refresh.
+                try:
+                    await self._mc.ensure_contacts()
+                    contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
+                except Exception:
+                    pass
             nick_dm = contact.get("adv_name") if contact else None
             messages.log_dm("meshcore", pubkey_prefix, text, nick=nick_dm)
             self._maybe_log_contact_announce(pubkey_prefix, contact)
