@@ -200,6 +200,32 @@ def _read_node_activity(announce_db_files, days=7):
     return result
 
 
+def _read_node_avg_hops(announce_db_files):
+    """Return dict addr → avg_hops (float) across all announces that have a hop count."""
+    result = {}
+    for f in announce_db_files:
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+            for addr, avg_h in conn.execute(
+                "SELECT addr, AVG(hops) FROM announces "
+                "WHERE hops IS NOT NULL GROUP BY addr"
+            ).fetchall():
+                a = addr.lower()
+                if avg_h is not None:
+                    # Running mean across multiple protocol DBs
+                    result[a] = (result[a] + avg_h) / 2 if a in result else avg_h
+        except Exception:
+            pass
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    return result
+
+
 def _active_lookback_days(announce_db_files, target_days=7, max_lookback=90):
     """Return the calendar-day span needed to capture *target_days* days that
     have at least one announce record, skipping over outage gaps.
@@ -494,20 +520,31 @@ def generate(announce_db, days=7):
                    for c in sample):
                 vp_features.append((idx, feat))
 
+        # Pre-compute county bounding boxes once — avoids recomputing for every node
+        vp_polys_node = []
+        for idx, feat in vp_features:
+            geom  = feat.get("geometry", {})
+            gtype = geom.get("type", "")
+            raw   = geom.get("coordinates", [])
+            polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
+            rings = []
+            for poly in polys:
+                if not poly:
+                    continue
+                outer = poly[0]
+                rings.append((
+                    min(c[0] for c in outer), max(c[0] for c in outer),
+                    min(c[1] for c in outer), max(c[1] for c in outer),
+                    outer,
+                ))
+            if rings:
+                vp_polys_node.append((idx, rings))
+
         county_count = {}
         for _proto, _addr, _nick, _lat, _lon in nodes:
-            for idx, feat in vp_features:
-                geom  = feat.get("geometry", {})
-                gtype = geom.get("type", "")
-                raw   = geom.get("coordinates", [])
-                polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
+            for idx, rings in vp_polys_node:
                 hit = False
-                for poly in polys:
-                    if not poly:
-                        continue
-                    outer = poly[0]
-                    bl = min(c[0] for c in outer);  br = max(c[0] for c in outer)
-                    bb = min(c[1] for c in outer);  bt = max(c[1] for c in outer)
+                for bl, br, bb, bt, outer in rings:
                     if bl <= _lon <= br and bb <= _lat <= bt and _pip_ring(_lon, _lat, outer):
                         hit = True
                         break
@@ -515,38 +552,43 @@ def generate(announce_db, days=7):
                     county_count[idx] = county_count.get(idx, 0) + 1
                     break
 
-        # Faint county grid — all viewport counties regardless of node presence
-        for _idx, feat in vp_features:
-            geom  = feat.get("geometry", {})
-            gtype = geom.get("type", "")
-            raw   = geom.get("coordinates", [])
-            polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
-            for poly in polys:
-                if poly:
-                    xs = [c[0] for c in poly[0]]
-                    ys = [c[1] for c in poly[0]]
-                    ax.plot(xs, ys, color="#556677", alpha=0.18, linewidth=0.3, zorder=1)
+        # Pre-extract drawing vertex arrays
+        from matplotlib.collections import PolyCollection as _PolyC
+        _draw_rings_node = [
+            (idx, [(c[0], c[1]) for c in outer])
+            for idx, rings in vp_polys_node
+            for _bl, _br, _bb, _bt, outer in rings
+        ]
+
+        # Faint county grid — all viewport counties, borders only
+        _all_verts = [xy for _, xy in _draw_rings_node]
+        ax.add_collection(_PolyC(_all_verts, facecolors="none",
+                                 edgecolors="#556677", linewidths=0.3,
+                                 alpha=0.18, zorder=1))
 
         if county_count:
             max_count = max(county_count.values()) or 1
-            for idx, feat in vp_features:
+            _fill_verts  = []
+            _fill_colors = []
+            _edge_verts  = []
+            for idx, xy in _draw_rings_node:
                 if idx not in county_count:
                     continue
                 fill_alpha = 0.10 + 0.55 * (county_count[idx] / max_count)
-                geom  = feat.get("geometry", {})
-                gtype = geom.get("type", "")
-                raw   = geom.get("coordinates", [])
-                polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
-                for poly in polys:
-                    if poly:
-                        xs = [c[0] for c in poly[0]]
-                        ys = [c[1] for c in poly[0]]
-                        ax.fill(xs, ys, color="#3388bb", alpha=fill_alpha, zorder=1)
-                        ax.plot(xs, ys, color="#3388bb", alpha=0.35, linewidth=0.3, zorder=1)
+                _fill_verts.append(xy)
+                _fill_colors.append((0x33 / 255, 0x88 / 255, 0xbb / 255, fill_alpha))
+                _edge_verts.append(xy)
+            ax.add_collection(_PolyC(_fill_verts, facecolors=_fill_colors,
+                                     edgecolors="none", zorder=1))
+            ax.add_collection(_PolyC(_edge_verts, facecolors="none",
+                                     edgecolors="#3388bb", linewidths=0.3,
+                                     alpha=0.35, zorder=1))
     except Exception as _e:
         print(f"[map_gen] county density fill unavailable: {_e}")
 
     # ── Node dots — size ∝ recent activity ───────────────────────────────────
+    # Batch scatter by protocol colour: one PathCollection per group instead
+    # of 1 per node (which forces matplotlib to rasterise thousands of objects).
     _PROTO_COLORS = {
         "meshcore":   "#00ccff",
         "meshtastic": "#44ff88",
@@ -558,15 +600,30 @@ def generate(announce_db, days=7):
         (node_activity.get(r[1].lower(), (None, 0))[1] for r in nodes),
         default=1,
     ) or 1
+
+    from collections import defaultdict as _dd
+    _groups: dict = _dd(lambda: {"lons": [], "lats": [], "sizes": []})
+    _labels = []  # (lon, lat, addr_prefix, activity)
     for proto, addr, nick, lat, lon in nodes:
         color = _PROTO_COLORS.get(proto, "#aaaaaa")
         act   = node_activity.get(addr.lower(), (None, 0))[1]
-        size  = 7 + 63 * ((act / max_act_all) ** 0.5)
-        ax.scatter(lon, lat, s=size, color=color, zorder=4, alpha=0.9,
+        size  = 7 + 63 * (act / max_act_all)
+        _groups[color]["lons"].append(lon)
+        _groups[color]["lats"].append(lat)
+        _groups[color]["sizes"].append(size)
+        _labels.append((lon, lat, addr[:4], act))
+
+    for color, data in _groups.items():
+        ax.scatter(data["lons"], data["lats"], s=data["sizes"],
+                   color=color, zorder=4, alpha=0.9,
                    linewidths=0.3, edgecolors="#ffffff40")
-        lbl = ax.text(lon + 0.04, lat, addr[:4], fontsize=4,
-                      color="#ccccdd", va="center", zorder=5, alpha=0.85)
-        lbl.set_path_effects([pe.withStroke(linewidth=0.9, foreground="#0d0d1e")])
+
+    # Node address labels — only label the most-active nodes to keep render
+    # time reasonable (1776 text objects at 150 DPI ≈ 20 s in savefig).
+    _labels.sort(key=lambda x: x[3], reverse=True)
+    for lon, lat, tag, _act in _labels[:200]:
+        ax.text(lon + 0.04, lat, tag, fontsize=4,
+                color="#ccccdd", va="center", zorder=5, alpha=0.85)
 
     # City reference labels
     for city, clat, clon in _CITIES:
@@ -601,6 +658,8 @@ def generate(announce_db, days=7):
               facecolor="#12122a", edgecolor="#3a3a5c", labelcolor="#ccccdd",
               framealpha=0.88, handlelength=1.8, borderpad=0.8,
               labelspacing=0.45)
+
+    _add_scale_bar(ax, lat_min, lat_max, lon_min, lon_max)
 
     gen_time = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
     ax.set_title(f"NodeBot — {len(nodes)} GPS nodes — {gen_time}",
@@ -713,11 +772,16 @@ def generate_county_map_async(announce_db):
 
 
 def generate_county_map(announce_db, days=7):
-    """Generate a 3-panel county overview PNG: node count, N-day activity, avg RSSI.
+    """Generate a 3-panel county overview PNG: lifetime node count, N-day activity, avg hops.
 
     Each panel uses the same county boundaries and map extent.  Panels are
     designed for side-by-side comparison so anomalies (e.g. high activity but
     low node count) jump out without having to decode overlaid encodings.
+
+    Panel 1 — Node Count: all GPS nodes ever seen (lifetime).
+    Panel 2 — Activity: announce count over the last N days (default 7).
+    Panel 3 — Avg Hops: all-time average hop count to reach each county,
+               green (direct / low hops) → red (many hops / deep in mesh).
     """
     import statistics
     import matplotlib
@@ -726,8 +790,9 @@ def generate_county_map(announce_db, days=7):
     import matplotlib.pyplot as plt
     import matplotlib.patches as _mp
 
-    ann_files    = _announce_db_files(announce_db)
+    ann_files     = _announce_db_files(announce_db)
     node_activity = _read_node_activity(ann_files, days=days)
+    node_hops     = _read_node_avg_hops(ann_files)
     all_gps_nodes = _read_gps_nodes(announce_db)
 
     if not all_gps_nodes:
@@ -768,32 +833,47 @@ def generate_county_map(announce_db, days=7):
                for c in sample):
             vp_features.append((idx, feat))
 
+    # ── Pre-compute county polygon bounding boxes (done once, not per node) ──
+    # Each entry: (idx, [(bl, br, bb, bt, outer_ring), ...])
+    vp_polys = []
+    for idx, feat in vp_features:
+        geom  = feat.get("geometry", {})
+        gtype = geom.get("type", "")
+        raw   = geom.get("coordinates", [])
+        polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
+        rings = []
+        for poly in polys:
+            if not poly:
+                continue
+            outer = poly[0]
+            rings.append((
+                min(c[0] for c in outer),  # bl
+                max(c[0] for c in outer),  # br
+                min(c[1] for c in outer),  # bb
+                max(c[1] for c in outer),  # bt
+                outer,
+            ))
+        if rings:
+            vp_polys.append((idx, rings))
+
     # ── Assign nodes to counties ──────────────────────────────────────────────
-    county_data = {}   # idx → {count, activity, rssi: []}
+    county_data = {}   # idx → {count, activity, hops: []}
     for _proto, _addr, _nick, _lat, _lon in all_gps_nodes:
         al = _addr.lower()
-        rssi_val, act_cnt = node_activity.get(al, (None, 0))
-        for idx, feat in vp_features:
-            geom  = feat.get("geometry", {})
-            gtype = geom.get("type", "")
-            raw   = geom.get("coordinates", [])
-            polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
+        _, act_cnt = node_activity.get(al, (None, 0))
+        avg_hops   = node_hops.get(al)
+        for idx, rings in vp_polys:
             hit = False
-            for poly in polys:
-                if not poly:
-                    continue
-                outer = poly[0]
-                bl = min(c[0] for c in outer);  br = max(c[0] for c in outer)
-                bb = min(c[1] for c in outer);  bt = max(c[1] for c in outer)
+            for bl, br, bb, bt, outer in rings:
                 if bl <= _lon <= br and bb <= _lat <= bt and _pip_ring(_lon, _lat, outer):
                     hit = True
                     break
             if hit:
-                d = county_data.setdefault(idx, {"count": 0, "activity": 0, "rssi": []})
+                d = county_data.setdefault(idx, {"count": 0, "activity": 0, "hops": []})
                 d["count"]    += 1
                 d["activity"] += act_cnt or 0
-                if rssi_val is not None:
-                    d["rssi"].append(rssi_val)
+                if avg_hops is not None:
+                    d["hops"].append(avg_hops)
                 break
 
     if not county_data:
@@ -801,18 +881,29 @@ def generate_county_map(announce_db, days=7):
 
     max_count = max(d["count"]    for d in county_data.values()) or 1
     max_act   = max(d["activity"] for d in county_data.values()) or 1
-    RSSI_VMIN, RSSI_VMAX = -120.0, -50.0
-    RSSI_CMAP = mcolors.LinearSegmentedColormap.from_list(
-        "rssi_county", ["#cc2211", "#ff8800", "#33bb55", "#2255ff"])
+    # Hops colormap: green (0 hops = direct) → orange → red (deep in mesh)
+    HOPS_VMIN = 0.0
+    HOPS_VMAX = float(max(
+        round(max(
+            (sum(d["hops"]) / len(d["hops"]) for d in county_data.values() if d["hops"]),
+            default=6.0,
+        )),
+        1,  # floor at 1 so the colour scale is never degenerate
+    ))
+    HOPS_CMAP = mcolors.LinearSegmentedColormap.from_list(
+        "hops_county", ["#22cc66", "#ffaa00", "#cc2211"])
 
     # ── Figure: 3 panels side by side ────────────────────────────────────────
+    from matplotlib.collections import PolyCollection as _PolyC
+    _NO_DATA_RGBA = (0x22 / 255, 0x22 / 255, 0x3a / 255, 1.0)
+
     fig, axes = plt.subplots(1, 3, figsize=(21, 7), facecolor="#1a1a2e")
     fig.subplots_adjust(left=0.01, right=0.97, top=0.90, bottom=0.03, wspace=0.04)
 
     PANELS = [
-        {"title": "Node Count",        "color": "#3388bb", "metric": "count"},
-        {"title": f"Activity  ({days} d)", "color": "#cc8822", "metric": "activity"},
-        {"title": "Avg RSSI Heard",    "color": None,      "metric": "rssi"},
+        {"title": "Node Count  (lifetime)",   "color": "#3388bb", "metric": "count"},
+        {"title": f"Activity  ({days} d)",    "color": "#cc8822", "metric": "activity"},
+        {"title": "Avg Hops  (lifetime)",     "color": None,      "metric": "hops"},
     ]
 
     def _val(d, metric):
@@ -820,10 +911,19 @@ def generate_county_map(announce_db, days=7):
             return d["count"] / max_count
         if metric == "activity":
             return d["activity"] / max_act
-        # rssi
-        if not d["rssi"]:
+        # hops — normalised so the observed max maps to 1.0
+        if not d["hops"]:
             return None
-        return (sum(d["rssi"]) / len(d["rssi"]) - RSSI_VMIN) / (RSSI_VMAX - RSSI_VMIN)
+        avg = sum(d["hops"]) / len(d["hops"])
+        return (avg - HOPS_VMIN) / max(HOPS_VMAX - HOPS_VMIN, 0.001)
+
+    # Pre-extract drawing vertex arrays from vp_polys (already computed above).
+    # One entry per outer ring: (county_idx, xy_pairs)
+    _draw_rings = [
+        (idx, [(c[0], c[1]) for c in outer])
+        for idx, rings in vp_polys
+        for _bl, _br, _bb, _bt, outer in rings
+    ]
 
     for pi, (ax, panel) in enumerate(zip(axes, PANELS)):
         ax.set_facecolor("#1a1a2e")
@@ -836,28 +936,29 @@ def generate_county_map(announce_db, days=7):
         ax.set_title(panel["title"], color="#ccccdd", fontsize=12, pad=5,
                      fontweight="bold")
 
-        # Draw all in-viewport counties (no-data counties get a dim background)
-        for idx, feat in vp_features:
-            d   = county_data.get(idx)
-            v   = _val(d, panel["metric"]) if d else None
-            geom  = feat.get("geometry", {})
-            gtype = geom.get("type", "")
-            raw   = geom.get("coordinates", [])
-            polys = [raw] if gtype == "Polygon" else (raw if gtype == "MultiPolygon" else [])
-            for poly in polys:
-                if not poly:
-                    continue
-                xs = [c[0] for c in poly[0]]
-                ys = [c[1] for c in poly[0]]
-                if v is None:
-                    ax.fill(xs, ys, color="#22223a", alpha=1.0, zorder=1)
-                elif panel["color"]:
-                    ax.fill(xs, ys, color=panel["color"],
-                            alpha=0.08 + 0.80 * v, zorder=1)
-                else:
-                    rgba = RSSI_CMAP(max(0.0, min(1.0, v)))
-                    ax.fill(xs, ys, color=rgba[:3], alpha=0.85, zorder=1)
-                ax.plot(xs, ys, color="#3a3a58", linewidth=0.25, alpha=0.6, zorder=2)
+        # Build per-polygon RGBA fill colours then draw the whole panel in two
+        # PolyCollection calls (fills + borders) instead of one ax.fill/ax.plot
+        # per county — dramatically faster for 1000+ polygons.
+        _verts  = []
+        _fcolors = []
+        for idx, xy in _draw_rings:
+            d = county_data.get(idx)
+            v = _val(d, panel["metric"]) if d else None
+            _verts.append(xy)
+            if v is None:
+                _fcolors.append(_NO_DATA_RGBA)
+            elif panel["color"]:
+                r, g, b = mcolors.to_rgb(panel["color"])
+                _fcolors.append((r, g, b, 0.08 + 0.80 * v))
+            else:
+                rgba = HOPS_CMAP(max(0.0, min(1.0, v)))
+                _fcolors.append((rgba[0], rgba[1], rgba[2], 0.85))
+
+        ax.add_collection(_PolyC(_verts, facecolors=_fcolors,
+                                 edgecolors="none", zorder=1))
+        ax.add_collection(_PolyC(_verts, facecolors="none",
+                                 edgecolors="#3a3a58", linewidths=0.25,
+                                 alpha=0.6, zorder=2))
 
         # State borders
         try:
@@ -898,19 +999,21 @@ def generate_county_map(announce_db, days=7):
                       labelcolor="#ccccdd", framealpha=0.88)
         else:
             sm = plt.cm.ScalarMappable(
-                cmap=RSSI_CMAP,
-                norm=mcolors.Normalize(vmin=RSSI_VMIN, vmax=RSSI_VMAX))
+                cmap=HOPS_CMAP,
+                norm=mcolors.Normalize(vmin=HOPS_VMIN, vmax=HOPS_VMAX))
             sm.set_array([])
             cb = fig.colorbar(sm, ax=ax, orientation="vertical",
                               fraction=0.025, pad=0.02, shrink=0.55)
-            cb.set_label("dBm", color="#ccccdd", fontsize=7)
+            cb.set_label("hops", color="#ccccdd", fontsize=7)
             cb.ax.yaxis.set_tick_params(color="#ccccdd")
             plt.setp(plt.getp(cb.ax.axes, "yticklabels"),
                      color="#ccccdd", fontsize=6)
-            # "No data" note for RSSI panel
-            ax.text(0.02, 0.02, "dark = no RSSI data",
+            ax.text(0.02, 0.02, "dark = no hop data  •  green = direct  •  red = deep mesh",
                     transform=ax.transAxes, fontsize=5.5, color="#666688",
                     va="bottom", ha="left")
+
+        if pi == 0:
+            _add_scale_bar(ax, lat_min, lat_max, lon_min, lon_max)
 
     gen_time = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
     fig.suptitle(f"NodeBot — County Overview  •  {gen_time}",
@@ -923,11 +1026,13 @@ def generate_county_map(announce_db, days=7):
     return len(county_data)
 
 
-def _parse_paths_from_pathsdb():
-    """Read all historically logged paths from paths.db.
+def _parse_paths_from_pathsdb(since=0):
+    """Read paths from paths.db seen within the given time window.
 
-    Returns full paths including sender endpoint (prepended) and our bot
-    node (appended) when available, giving the complete hop chain:
+    ``since`` is a Unix timestamp; only rows with last_seen >= since are
+    returned (0 = no filter, return all).  Returns full paths including
+    the sender endpoint (prepended) and our bot node (appended) when
+    available, giving the complete hop chain:
       [sender] → relay1 → … → relayN → [our_node]
     """
     if not _storage_path:
@@ -938,7 +1043,10 @@ def _parse_paths_from_pathsdb():
     result = []
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        rows = conn.execute("SELECT path_str, sender_id, our_id FROM paths").fetchall()
+        rows = conn.execute(
+            "SELECT path_str, sender_id, our_id FROM paths WHERE last_seen >= ?",
+            (since,),
+        ).fetchall()
         conn.close()
         for path_str, sender_id, our_id in rows:
             ids = [x.strip() for x in path_str.split(",") if x.strip()]
@@ -954,11 +1062,12 @@ def _parse_paths_from_pathsdb():
     return result
 
 
-def _parse_paths_from_messages(messages_db):
+def _parse_paths_from_messages(messages_db, since=0):
     """Return [(path_ids, rssi)] from Path: strings in channel messages.
 
-    rssi is the signal strength of the full message as received by our bot
-    (last-hop RSSI), or None if not recorded.
+    ``since`` is a Unix timestamp; only messages with ts >= since are
+    considered (0 = no filter).  rssi is the signal strength of the full
+    message as received by our bot (last-hop RSSI), or None if not recorded.
     """
     if not os.path.isfile(messages_db):
         return []
@@ -973,7 +1082,9 @@ def _parse_paths_from_messages(messages_db):
         for table in tables:
             try:
                 rows = conn.execute(
-                    f'SELECT text, rssi FROM "{table}" ORDER BY id DESC LIMIT 2000'  # nosec B608
+                    f'SELECT text, rssi FROM "{table}" WHERE ts >= ?'  # nosec B608
+                    f' ORDER BY id DESC LIMIT 2000',
+                    (since,),
                 ).fetchall()
                 for text, rssi in rows:
                     if text and "Path:" in text:
@@ -1284,6 +1395,45 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(min(1.0, math.sqrt(a)))
 
 
+def _add_scale_bar(ax, lat_min, lat_max, lon_min, lon_max):
+    """Draw a geographic scale bar in the lower-left corner of *ax*.
+
+    Picks a round-number distance (~20 % of the map width) in miles,
+    converts it to degrees of longitude at the centre latitude, and
+    renders a horizontal bar with end ticks and a text label.
+    """
+    import math
+    import matplotlib.patheffects as _pe
+
+    lat_c = (lat_min + lat_max) / 2.0
+    map_w_km = _haversine_km(lat_c, lon_min, lat_c, lon_max)
+
+    _KM_PER_MI = 1.60934
+    target_km = map_w_km * 0.20
+    nice_mi = [5, 10, 25, 50, 100, 150, 200, 250, 500]
+    chosen_mi = min(nice_mi, key=lambda m: abs(m * _KM_PER_MI - target_km))
+    chosen_km = chosen_mi * _KM_PER_MI
+
+    cos_lat = math.cos(math.radians(lat_c))
+    d_lon = chosen_km / (111.32 * max(cos_lat, 1e-6))
+
+    # 3 % from left edge, 4 % from bottom (in data coordinates)
+    x0 = lon_min + 0.03 * (lon_max - lon_min)
+    y0 = lat_min + 0.04 * (lat_max - lat_min)
+    x1 = x0 + d_lon
+    tick_h = (lat_max - lat_min) * 0.010
+
+    ax.plot([x0, x1], [y0, y0], color="#ccccdd", linewidth=2.5,
+            solid_capstyle="butt", zorder=20)
+    for xk in (x0, x1):
+        ax.plot([xk, xk], [y0 - tick_h, y0 + tick_h],
+                color="#ccccdd", linewidth=1.5, zorder=20)
+    lbl = ax.text((x0 + x1) / 2, y0 + tick_h * 1.8, f"{chosen_mi} mi",
+                  color="#ccccdd", fontsize=6, ha="center", va="bottom",
+                  zorder=20)
+    lbl.set_path_effects([_pe.withStroke(linewidth=1.2, foreground="#1a1a2e")])
+
+
 def _fit_path_loss(announce_db):
     """Fit RSSI = alpha − 10·n·log10(d_km) from GPS node announce RSSI.
 
@@ -1442,15 +1592,18 @@ def generate_path_map(announce_db, days=7):
     # All GPS nodes from announce DB (background layer + 2σ anchor)
     all_gps_nodes = _read_gps_nodes(announce_db)
 
+    # Restrict paths to the requested time window (default: last 7 days).
+    since = time.time() - days * 86400
+
     # Collect paths first so we can pass them for nearest-match disambiguation.
     # _parse_paths_from_messages now returns [(path_ids, rssi)].
-    all_paths = _parse_paths_from_pathsdb()
+    all_paths = _parse_paths_from_pathsdb(since=since)
     paths_with_rssi = []
     if _storage_path and os.path.isdir(_storage_path):
         for fname in sorted(os.listdir(_storage_path)):
             if fname.startswith("messages_") and fname.endswith(".db"):
                 pw = _parse_paths_from_messages(
-                    os.path.join(_storage_path, fname))
+                    os.path.join(_storage_path, fname), since=since)
                 paths_with_rssi.extend(pw)
                 all_paths.extend(ids for ids, _ in pw)
 
@@ -1651,7 +1804,7 @@ def generate_path_map(announce_db, days=7):
     for proto, addr, nick, lat, lon in all_gps_nodes:
         color = _PROTO_COLORS.get(proto, "#aaaaaa")
         act   = node_activity.get(addr.lower(), (None, 0))[1]
-        size  = 7 + 48 * ((act / max_act_path) ** 0.5)
+        size  = 7 + 48 * (act / max_act_path)
         ax.scatter(lon, lat, s=size, color=color, zorder=4, alpha=0.75,
                    linewidths=0.3, edgecolors="#ffffff30")
 
@@ -1851,6 +2004,8 @@ def generate_path_map(announce_db, days=7):
               facecolor="#12122a", edgecolor="#3a3a5c", labelcolor="#ccccdd",
               framealpha=0.88, handlelength=2.0, borderpad=0.8,
               labelspacing=0.45)
+
+    _add_scale_bar(ax, lat_min, lat_max, lon_min, lon_max)
 
     n_gps_bg   = len(all_gps_nodes)
     n_pathed   = len(path_node_coords)
