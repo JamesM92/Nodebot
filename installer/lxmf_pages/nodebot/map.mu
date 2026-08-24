@@ -24,7 +24,7 @@ bot_name     = config.get("bot", "name", fallback="NodeBot").strip()
 NOMAD_FILES  = os.path.expanduser("~/.nomadnetwork/storage/files")
 MAP_PATH     = os.path.join(NOMAD_FILES, "nodebot", "map.png")
 LOCKFILE     = os.path.join(storage_path, "map_generating.lock")
-MAP_MAX_AGE  = 300   # seconds
+MAP_MAX_AGE  = 1800  # seconds (30 min)
 LOCK_TIMEOUT = 120   # treat lock as stale after this
 
 VENV_PYTHON  = os.path.join(PROJECT_DIR, ".venv", "bin", "python3")
