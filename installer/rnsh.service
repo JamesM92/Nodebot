@@ -1,0 +1,48 @@
+# rnsh (shell over Reticulum) listener service.
+# Installed by installer/install_rnsh.sh
+#
+# Provides remote shell access to the Pi via any Reticulum interface:
+#   - rNode LoRa radio  (in LoRa range, no internet required)
+#   - Beleth RNS Hub    (over internet, via TCP)
+#
+# Client connections (rnsh shell or SSH ProxyCommand) use the destination hash
+# printed by: rnsh -l -s nodebot -p
+#
+# Authentication modes (edit ExecStart to switch):
+#
+#   Mode A — Reticulum identity allowlist:
+#     -a <identity_hash>  restricts access to specific Reticulum identities.
+#     Add multiple -a flags for multiple clients. Remove -n so identification
+#     is required. Client must run rnsh with their identity to connect.
+#     Find a client's hash with: rnsh -l -s nodebot -p  (shows connecting peers)
+#
+#   Mode B — SSH ProxyCommand (laptop / VS Code Remote):
+#     Replace ExecStart with:
+#       /home/penguin/.local/bin/rnsh -l -s nodebot -n -b 0 -- nc 127.0.0.1 22
+#     Client: ssh -o ProxyCommand="rnsh -c 05afe23f38c2e2fba6f4eadc5415c33f" penguin@nodebot
+#     SSH keys in ~/.ssh/authorized_keys handle authentication; rnsh only tunnels.
+#     NomadPortal/Android apps cannot use this mode.
+#
+#   Both modes can run simultaneously as separate service instances with
+#   different -s names → different destination hashes.
+
+[Unit]
+Description=rnsh Reticulum Shell Listener
+Documentation=https://github.com/acehoss/rnsh
+After=nomadnet.service reticulum.service network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=penguin
+ExecStart=/home/penguin/.local/bin/rnsh -l -s nodebot -n -b 0
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
