@@ -25,8 +25,10 @@ _writes_since_check = 0
 _last_check = 0.0
 
 _ANNOUNCE_COOLDOWN  = 15 * 60  # suppress repeated announces within this window (seconds)
-_ANNOUNCE_MAX_NODES = 500      # unique addresses to keep per protocol
-_ANNOUNCE_MAX_HIST  = 3        # announce rows to keep per address
+_ANNOUNCE_MAX_NODES = 5000     # unique addresses to keep per protocol
+_ANNOUNCE_MAX_HIST  = 2000     # announce rows to keep per address
+_ANNOUNCE_PRUNE_EVERY = 50     # run node-cap DELETE only every N inserts (avoids full-table scan on every insert)
+_announce_insert_counts: dict = {}  # {proto: insert_count}
 
 # When True, skip all LXMF announce logging. NodeBot runs as a shared-instance
 # client so all announces arrive via the same local socket — LoRa vs TCP origin
@@ -484,13 +486,16 @@ def log_announce(proto, addr, *, nick=None, short_name=None, lat=None, lon=None,
                         SELECT id FROM announces WHERE addr=? ORDER BY ts DESC LIMIT ?
                     )
                 """, (addr, addr, _ANNOUNCE_MAX_HIST))
-                # Keep only _ANNOUNCE_MAX_NODES unique addresses per protocol (by most recent)
-                conn.execute("""
-                    DELETE FROM announces WHERE addr NOT IN (
-                        SELECT addr FROM announces GROUP BY addr
-                        ORDER BY MAX(ts) DESC LIMIT ?
-                    )
-                """, (_ANNOUNCE_MAX_NODES,))
+                # Keep only _ANNOUNCE_MAX_NODES unique addresses per protocol (by most recent).
+                # This is a full-table scan so we only run it every _ANNOUNCE_PRUNE_EVERY inserts.
+                _announce_insert_counts[proto] = _announce_insert_counts.get(proto, 0) + 1
+                if _announce_insert_counts[proto] % _ANNOUNCE_PRUNE_EVERY == 0:
+                    conn.execute("""
+                        DELETE FROM announces WHERE addr NOT IN (
+                            SELECT addr FROM announces GROUP BY addr
+                            ORDER BY MAX(ts) DESC LIMIT ?
+                        )
+                    """, (_ANNOUNCE_MAX_NODES,))
                 # Update weighted-average position estimate when GPS is present
                 if lat is not None and lon is not None:
                     est = conn.execute(
