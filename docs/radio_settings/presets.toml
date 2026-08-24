@@ -109,7 +109,8 @@ nodes = [
 [[lxmf.presets]]
 region = "United States"
 nodes = [
-  { freq_hz = 914875000, bw_hz = 125000, sf = 8, description = "Portsmouth NH / Olympia WA / Chicago IL" },
+  { freq_hz = 914875000, bw_hz = 250000, sf = 11, description = "Columba slot 51 (LongFast SF11/250kHz)" },
+  { freq_hz = 914875000, bw_hz = 125000, sf = 8,  description = "Portsmouth NH / Olympia WA / Chicago IL (SF8/125kHz)" },
 ]
 
 # NOTE: "Manual entry (custom values)" is appended by the installer at runtime,

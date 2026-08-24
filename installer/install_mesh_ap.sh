@@ -110,13 +110,15 @@ normalise_mac() {
 # ── 4. Install dnsmasq ─────────────────────────────────────────────────────
 echo ""
 echo "── Step 4: Installing dnsmasq ──"
-if ! command -v dnsmasq &>/dev/null; then
+if ! systemctl list-unit-files dnsmasq.service &>/dev/null || \
+   ! dpkg -l dnsmasq 2>/dev/null | grep -q ^ii; then
     apt-get install -y dnsmasq
 fi
 ok "dnsmasq installed"
 
 # Write dnsmasq config
 DNSMASQ_CONF="/etc/dnsmasq.d/nodebot-mesh-ap.conf"
+mkdir -p /etc/dnsmasq.d
 cat > "$DNSMASQ_CONF" << DNSMASQ_EOF
 # NodeBot Mesh AP — DHCP for Meshtastic boards
 interface=$AP_IFACE
@@ -157,8 +159,8 @@ nmcli connection add \
     con-name "NodeBot-Mesh-AP" \
     ssid "$AP_SSID" \
     mode ap \
-    band bg \
-    channel "$AP_CHANNEL" \
+    wifi.band bg \
+    wifi.channel "$AP_CHANNEL" \
     ipv4.method manual \
     ipv4.addresses "$AP_IP/24" \
     ipv4.gateway "" \
