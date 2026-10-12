@@ -319,12 +319,17 @@ class NodeBot:
     # ANNOUNCE
     # =====================================================
 
-    def announce_all(self):
+    def announce_all(self, flood=False):
         announced = []
         adapters = [(name, a) for name, a in self.transports.items() if hasattr(a, "announce")]
         for i, (name, adapter) in enumerate(adapters):
             try:
-                adapter.announce()
+                # Only meshcore_adapter's announce() understands flood=; other
+                # adapters (meshtastic, lxmf) take no arguments.
+                try:
+                    adapter.announce(flood=flood)
+                except TypeError:
+                    adapter.announce()
                 announced.append(name)
             except Exception as e:
                 print(f"[engine] announce failed on {name}: {e}")

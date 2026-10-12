@@ -54,6 +54,7 @@ class NodeBot:
         _commands.load_plugins()
 
         signal.signal(signal.SIGUSR1, self._handle_sigusr1)
+        signal.signal(signal.SIGUSR2, self._handle_sigusr2)
         signal.signal(signal.SIGTERM, lambda s, f: self._shutdown())
 
         print("[nodebot] running")
@@ -136,12 +137,20 @@ class NodeBot:
     # =====================================================
 
     def _handle_sigusr1(self, signum, frame):
-        print("[nodebot] SIGUSR1 received — announcing on all transports")
-        announced = self.engine.announce_all()
+        print("[nodebot] SIGUSR1 received — flood-announcing on all transports")
+        announced = self.engine.announce_all(flood=True)
         if announced:
             print(f"[nodebot] announced on: {', '.join(announced)}")
         else:
             print("[nodebot] no transports with announce support")
+
+    def _handle_sigusr2(self, signum, frame):
+        print("[nodebot] SIGUSR2 received — forcing MeshCore AGC-lockup reboot")
+        adapter = self.transports.get("meshcore_adapter")
+        if adapter and hasattr(adapter, "force_agc_reboot"):
+            adapter.force_agc_reboot()
+        else:
+            print("[nodebot] no meshcore_adapter loaded")
 
     # =====================================================
     # MAIN LOOP

@@ -402,7 +402,12 @@ class MeshCoreAdapter:
                                 self._agc_reset_count      = 0
                                 self._lockup_reboot_count += 1
                                 self._pool_tainted         = True
-                                self._force_radio_recal    = True  # SX1262 modem re-init
+                                # _force_radio_recal deliberately NOT set here — confirmed
+                                # 2026-09-14 that forcing set_radio() (even with unchanged
+                                # params) leaves RX permanently dead (recv/rx_air frozen at
+                                # 0, last_rssi pinned at a bogus reading) and does NOT
+                                # recover on its own, across two independent reproductions
+                                # and even a full physical power cycle. Plain reboot() only.
                                 self._reconnect_requested  = True
                         elif (silence >= _LOG_DATA_STALE_SECS
                                 and now - _last_stale_reset >= 30):
@@ -420,7 +425,7 @@ class MeshCoreAdapter:
                                           f"{self._agc_reset_count} TX failures — rebooting firmware")
                                     self._agc_reset_count    = 0
                                     self._pool_tainted        = True
-                                    self._force_radio_recal   = True  # SX1262 modem re-init on recovery
+                                    # _force_radio_recal deliberately NOT set — see note above.
                                     self._reconnect_requested = True
                                 else:
                                     print(f"[meshcore_adapter] AGC reset TX failed "
@@ -543,12 +548,15 @@ class MeshCoreAdapter:
                             print("[meshcore_adapter] watchdog: no RF events, reconnecting")
                             break
 
-                        # Periodic presence announce (no-flood — avoids rx_queue burst)
+                        # Periodic presence announce — network-wide broadcast, so this
+                        # one floods through repeaters (restores 5c0716e, lost in the
+                        # v0.3.5/v0.3.0/v0.1.0 revert chain during TABLE_FULL triage).
+                        # Everything else (startup, AGC resets) stays zero-hop.
                         if now - _last_ann >= _PERIODIC_ANN_SECS:
                             _last_ann = now
                             try:
-                                await self._mc.commands.send_advert(flood=False)
-                                print("[meshcore_adapter] periodic announce (no-flood)")
+                                await self._mc.commands.send_advert(flood=True)
+                                print("[meshcore_adapter] periodic announce (flood)")
                             except Exception:
                                 pass
 
@@ -1708,22 +1716,86 @@ class MeshCoreAdapter:
     # ANNOUNCE
     # =====================================================
 
-    async def _announce_async(self):
+    async def _announce_async(self, flood=False):
         try:
-            await self._mc.commands.send_advert(flood=False)
-            print("[meshcore_adapter] announced to direct neighbours (no-flood)")
+            await self._mc.commands.send_advert(flood=flood)
+            label = "flood" if flood else "zero-hop"
+            print(f"[meshcore_adapter] announced ({label})")
         except Exception as e:
             print(f"[meshcore_adapter] announce failed: {e}")
 
-    def announce(self):
+    def announce(self, flood=False):
+        # Default stays zero-hop — bot.py's 5-min housekeeping loop calls this
+        # unconditionally (its own 12h gate was lost in the same revert chain
+        # as the periodic-flood fix; not restoring that here to stay in scope).
+        # Pass flood=True for an explicit manual/admin broadcast (see SIGUSR1).
         if not self._loop or not self._mc:
             print("[meshcore_adapter] not connected, cannot announce")
             return
-        future = asyncio.run_coroutine_threadsafe(self._announce_async(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self._announce_async(flood=flood), self._loop)
         try:
             future.result(timeout=10)
         except Exception as e:
             print(f"[meshcore_adapter] announce error: {e}")
+
+    def force_agc_reboot(self):
+        """Manually trigger the same reboot-and-reconnect path the AGC-lockup
+        watchdog uses on its own. For cases where noise_floor reads healthy
+        (so the automatic timer never fires) but recv/rx_air are independently
+        confirmed frozen against known real network traffic — i.e. the
+        noise-floor heuristic itself may not be catching this lockup.
+        Picked up by the connection loop's watchdog check within ~5s
+        (_POLL_SECS); the loop then breaks, reboots the firmware, and
+        reconnects — identical to the automatic path.
+        """
+        if not self._mc:
+            print("[meshcore_adapter] not connected, cannot force reboot")
+            return
+        print("[meshcore_adapter] manual AGC reboot requested (noise floor was healthy — "
+              "forcing reboot based on frozen recv/rx_air against known traffic)")
+        self._pool_tainted        = True
+        # _force_radio_recal deliberately NOT set — confirmed 2026-09-14 that forcing
+        # set_radio() leaves RX permanently dead instead of recovering it. Plain
+        # reboot() only; see the note in the automatic lockup-timer branch above.
+        self._reconnect_requested = True
+
+    async def _resend_radio_params_async(self):
+        try:
+            from meshcore.events import EventType
+            print(f"[meshcore_adapter] resending set_radio "
+                  f"({self._radio_freq}/{self._radio_bw}/SF{self._radio_sf}/CR{self._radio_cr}) "
+                  f"— isolated test, no reboot/reconnect")
+            result = await self._mc.commands.set_radio(
+                self._radio_freq, self._radio_bw,
+                self._radio_sf,   self._radio_cr,
+                repeat=self._radio_repeat,
+            )
+            if result and result.type == EventType.OK:
+                print("[meshcore_adapter] set_radio resend: OK")
+            else:
+                print(f"[meshcore_adapter] set_radio resend: unexpected result {result}")
+        except Exception as e:
+            print(f"[meshcore_adapter] set_radio resend failed: {e}")
+
+    def resend_radio_params(self):
+        """DANGER — confirmed destructive, keep for deliberate future debugging only.
+
+        CONFIRMED 2026-09-14: calling set_radio() on this firmware/board — even
+        with completely unchanged params — permanently kills RX. recv/rx_air
+        freeze at 0 and last_rssi pins at a bogus reading, with no recovery
+        from further reboots or even a full physical power cycle. Reproduced
+        twice (once via force_agc_reboot()'s forced recal, once via this
+        isolated no-reboot call). Not wired to any signal — call only by
+        editing code directly, and only if re-testing this specific finding.
+        """
+        if not self._loop or not self._mc:
+            print("[meshcore_adapter] not connected, cannot resend radio params")
+            return
+        future = asyncio.run_coroutine_threadsafe(self._resend_radio_params_async(), self._loop)
+        try:
+            future.result(timeout=10)
+        except Exception as e:
+            print(f"[meshcore_adapter] resend_radio_params error: {e}")
 
     # =====================================================
     # STOP
