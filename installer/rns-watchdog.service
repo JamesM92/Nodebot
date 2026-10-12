@@ -1,0 +1,13 @@
+# Runs scripts/rns_watchdog.sh — checks nomadnet + rnsh for the known
+# stuck-but-"active" state and restarts whichever one is affected.
+# Installed by installer/install_rns_watchdog.sh. Triggered by
+# rns-watchdog.timer; not meant to run standalone.
+
+[Unit]
+Description=RNS (nomadnet/rnsh) stuck-state watchdog
+Documentation=https://github.com/JamesM92/NodeBot
+After=nomadnet.service rnsh.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/penguin/github.com/JamesM92/NodeBot/scripts/rns_watchdog.sh

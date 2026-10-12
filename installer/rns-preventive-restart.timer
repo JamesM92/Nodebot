@@ -1,0 +1,16 @@
+# Fires rns-preventive-restart.service weekly, Sunday 04:30 local time —
+# a quiet window clear of the other scheduled maintenance on this box
+# (apt-daily ~03:57, man-db ~02:03). Persistent=true so a missed run
+# (Pi was off) still fires once it's back up.
+# Installed by installer/install_rns_watchdog.sh.
+
+[Unit]
+Description=Weekly preventive restart of nomadnet + rnsh
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

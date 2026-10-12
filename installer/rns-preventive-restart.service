@@ -1,0 +1,16 @@
+# Weekly preventive restart of nomadnet + rnsh — a backstop against any
+# slow state degradation the watchdog's log-pattern check doesn't catch
+# (confirmed 2026-10-12: these daemons can report "active" while genuinely
+# stuck, and a reconnect alone isn't a reliable recovery — see
+# scripts/rns_watchdog.sh for the full incident note).
+# Installed by installer/install_rns_watchdog.sh. Triggered by
+# rns-preventive-restart.timer; not meant to run standalone.
+
+[Unit]
+Description=Weekly preventive restart of nomadnet + rnsh
+Documentation=https://github.com/JamesM92/NodeBot
+After=nomadnet.service rnsh.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart nomadnet rnsh
