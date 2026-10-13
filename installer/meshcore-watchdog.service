@@ -1,0 +1,14 @@
+# Runs scripts/meshcore_watchdog.sh — restarts nodebot if the MeshCore
+# TCP connection is stuck (dead socket, no clean reconnect; confirmed
+# 2026-10-10 through 2026-10-12 incident, a 2+ day outage before anyone
+# noticed). Installed by installer/install_meshcore_watchdog.sh.
+# Triggered by meshcore-watchdog.timer; not meant to run standalone.
+
+[Unit]
+Description=MeshCore TCP stuck-connection watchdog
+Documentation=https://github.com/JamesM92/NodeBot
+After=nodebot.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/penguin/github.com/JamesM92/NodeBot/scripts/meshcore_watchdog.sh

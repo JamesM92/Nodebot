@@ -1,0 +1,13 @@
+# Runs meshcore-watchdog.service every 5 minutes.
+# Installed by installer/install_meshcore_watchdog.sh.
+
+[Unit]
+Description=Run MeshCore stuck-connection watchdog every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
